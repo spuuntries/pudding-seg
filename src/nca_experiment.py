@@ -38,6 +38,55 @@ def extract_segmentation_pca(hidden_states: np.ndarray) -> np.ndarray:
     return rgb
 
 
+def extract_discrete_segmentation(
+    hidden_states: np.ndarray,
+    n_clusters: int = 4,
+    seed: int = 42,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Clusters hidden channels (C, H, W) into n_clusters discrete masks.
+
+    Returns:
+        labels_2d: (H, W) integer cluster map in [0, n_clusters-1]
+        discrete_rgb: (H, W, 3) uint8 image with distinct colors per cluster
+        masks_mosaic: (H, W * n_clusters, 3) uint8 image of binary masks side-by-side
+    """
+    from scipy.cluster.vq import kmeans2
+
+    c, h, w = hidden_states.shape
+    features = hidden_states.reshape(c, -1).T.copy()
+    f_mean = np.mean(features, axis=0, keepdims=True)
+    f_std = np.std(features, axis=0, keepdims=True) + 1e-6
+    feats_norm = (features - f_mean) / f_std
+
+    _, labels = kmeans2(feats_norm, k=n_clusters, minit="points", seed=seed)
+    labels_2d = labels.reshape(h, w)
+
+    palette = np.array([
+        [230, 25, 75],    # Red
+        [60, 180, 75],    # Green
+        [255, 225, 25],   # Yellow
+        [0, 130, 200],    # Blue
+        [245, 130, 48],   # Orange
+        [145, 30, 180],   # Purple
+        [70, 240, 240],   # Cyan
+        [240, 50, 230],   # Magenta
+        [210, 245, 60],   # Lime
+        [250, 190, 212],  # Pink
+    ], dtype=np.uint8)
+
+    discrete_rgb = palette[labels_2d % len(palette)]
+
+    mask_strips = []
+    for k in range(n_clusters):
+        mask_k = (labels_2d == k).astype(np.uint8) * 255
+        mask_rgb = np.stack([mask_k, mask_k, mask_k], axis=-1)
+        mask_strips.append(mask_rgb)
+    masks_mosaic = np.concatenate(mask_strips, axis=1)
+
+    return labels_2d, discrete_rgb, masks_mosaic
+
+
+
 def run_nca_deq(
     steps: int = 150,
     lr: float = 3e-3,

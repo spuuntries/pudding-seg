@@ -202,13 +202,14 @@ def run_deq_experiment(
     alpha: float = 0.1,
     rho: float = 1.0,
     tv_weight: float = 0.05,
+    n_clusters: int = 4,
     seed: int = 42,
     save_dir=None,
 ) -> dict:
     import time
     from PIL import Image
     from .dip_experiment import adam_apply, adam_init, psnr
-    from .nca_experiment import extract_segmentation_pca
+    from .nca_experiment import extract_discrete_segmentation, extract_segmentation_pca
 
     key = jax.random.PRNGKey(seed)
     k_net, k_init = jax.random.split(key)
@@ -271,6 +272,16 @@ def run_deq_experiment(
         hidden_np = np.asarray(z_curr[0])
         seg_rgb = extract_segmentation_pca(hidden_np)
         Image.fromarray(seg_rgb).save(save_dir / "deq_segmentation_pca.png")
-        print(f"Saved DEQ reconstruction and segmentation maps to {save_dir}")
+
+        # Discrete clustering
+        labels_2d, discrete_rgb, masks_mosaic = extract_discrete_segmentation(
+            hidden_np, n_clusters=n_clusters, seed=seed
+        )
+        Image.fromarray(discrete_rgb).save(save_dir / "deq_discrete_seg.png")
+        Image.fromarray(masks_mosaic).save(save_dir / "deq_cluster_masks.png")
+        np.save(save_dir / "z_equilibrium.npy", hidden_np)
+        np.save(save_dir / "cluster_labels.npy", labels_2d)
+
+        print(f"Saved DEQ reconstruction, PCA maps, and {n_clusters}-cluster discrete masks to {save_dir}")
 
     return history
