@@ -21,6 +21,7 @@ image = (
         "scipy",
         "pillow",
         "matplotlib",
+        "scikit-image",
         "tqdm",
     ])
     .add_local_dir(LOCAL_DIR / "src", remote_path="/root/src")
@@ -88,12 +89,13 @@ def run_modal_nca(
     volumes={"/root/results": volume},
 )
 def run_modal_deq(
+    image_name: str = "coins",
     steps: int = 150,
     lr: float = 3e-3,
     channels: int = 16,
     hidden_dim: int = 64,
-    size: int = 32,
-    deq_steps: int = 10,
+    size: int = 48,
+    deq_steps: int = 15,
     inner_steps: int = 3,
     state_lr: float = 0.05,
     alpha: float = 0.1,
@@ -105,11 +107,12 @@ def run_modal_deq(
     from pathlib import Path
     from src.deq_conditioned import run_deq_experiment
 
-    out_dir = Path("/root/results") / f"deq_conditioned_{size}x{size}_c{channels}"
+    out_dir = Path("/root/results") / f"deq_{image_name}_{size}x{size}_c{channels}"
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    print(f"=== Running Modal GPU Conditioned DEQ PC-ALM on A10G (size={size}x{size}, tv_weight={tv_weight}) ===")
+    print(f"=== Running Modal GPU Conditioned DEQ PC-ALM on '{image_name}' on A10G (size={size}x{size}, tv_weight={tv_weight}) ===")
     hist = run_deq_experiment(
+        image_name=image_name,
         steps=steps,
         lr=lr,
         channels=channels,
@@ -136,9 +139,10 @@ def run_modal_deq(
 
 @app.local_entrypoint()
 def main(
+    image: str = "coins",
     mode: str = "deq",
     steps: int = 150,
-    size: int = 32,
+    size: int = 48,
     channels: int = 16,
     deq_steps: int = 15,
     tv_weight: float = 0.05,
@@ -146,13 +150,14 @@ def main(
     from pathlib import Path
     if mode == "deq":
         res = run_modal_deq.remote(
+            image_name=image,
             steps=steps,
             size=size,
             channels=channels,
             deq_steps=deq_steps,
             tv_weight=tv_weight,
         )
-        local_out = Path("results/deq_conditioned")
+        local_out = Path(f"results/deq_{image}")
     else:
         res = run_modal_nca.remote(
             steps=steps,

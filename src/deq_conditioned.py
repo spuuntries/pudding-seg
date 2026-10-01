@@ -164,12 +164,38 @@ def compute_deq_grads(
     return grads, loss, z_eq
 
 
+def load_target_image(image_name: str = "coins", size: int = 48) -> tuple[np.ndarray, int]:
+    """Loads a target image (normalized to [0, 1]) and returns (img_np with shape (C, H, W), out_channels)."""
+    from PIL import Image
+
+    if image_name == "synthetic":
+        from .dip_experiment import create_synthetic_target
+        img = create_synthetic_target(size)
+        return img[None, ...], 1
+
+    if image_name in {"camera", "coins", "astronaut", "coffee", "chelsea"}:
+        import skimage.data as skdata
+        raw = getattr(skdata, image_name)()
+    else:
+        raw = np.array(Image.open(image_name))
+
+    pil_img = Image.fromarray(raw)
+    pil_resized = pil_img.resize((size, size), Image.Resampling.BILINEAR)
+    arr = np.array(pil_resized, dtype=np.float32) / 255.0
+
+    if arr.ndim == 2:
+        return arr[None, ...], 1
+    else:
+        return np.transpose(arr, (2, 0, 1)), arr.shape[2]
+
+
 def run_deq_experiment(
+    image_name: str = "coins",
     steps: int = 150,
     lr: float = 3e-3,
     channels: int = 16,
     hidden_dim: int = 64,
-    size: int = 32,
+    size: int = 48,
     deq_steps: int = 15,
     inner_steps: int = 3,
     state_lr: float = 0.05,
@@ -181,21 +207,21 @@ def run_deq_experiment(
 ) -> dict:
     import time
     from PIL import Image
-    from .dip_experiment import adam_apply, adam_init, create_synthetic_target, psnr
+    from .dip_experiment import adam_apply, adam_init, psnr
     from .nca_experiment import extract_segmentation_pca
 
     key = jax.random.PRNGKey(seed)
     k_net, k_init = jax.random.split(key)
 
-    clean_np = create_synthetic_target(size)
-    y_target = jnp.asarray(clean_np[None, None, ...], dtype=jnp.float32)
+    clean_np, out_channels = load_target_image(image_name, size=size)
+    y_target = jnp.asarray(clean_np[None, ...], dtype=jnp.float32)
 
     # Condition: normalized 2D coordinate grid (x, y)
     yy, xx = np.mgrid[:size, :size].astype(np.float32) / float(size)
     cond_np = np.stack([xx, yy], axis=0)[None, ...]  # (1, 2, H, W)
     cond = jnp.asarray(cond_np)
 
-    params = init_conditioned_deq(k_net, channels=channels, hidden_dim=hidden_dim, in_cond_dim=2, out_channels=1)
+    params = init_conditioned_deq(k_net, channels=channels, hidden_dim=hidden_dim, in_cond_dim=2, out_channels=out_channels)
     opt_state = adam_init(params)
     z_curr = jax.random.normal(k_init, (1, channels, size, size)) * 0.05
 
@@ -209,7 +235,7 @@ def run_deq_experiment(
         return p, opt_s, loss, z_next
 
     history = {"step": [], "loss": [], "psnr": []}
-    print(f"=== Starting Conditioned DEQ PC-ALM (channels={channels}, steps={steps}, size={size}x{size}) ===")
+    print(f"=== Starting Conditioned DEQ PC-ALM on '{image_name}' (out_c={out_channels}, channels={channels}, steps={steps}, size={size}x{size}) ===")
     t0 = time.time()
 
     for s in range(1, steps + 1):
@@ -217,7 +243,7 @@ def run_deq_experiment(
 
         if s % 10 == 0 or s == 1 or s == steps:
             pred = readout(z_curr, params)
-            pred_np = np.asarray(pred[0, 0])
+            pred_np = np.asarray(pred[0])
             p_val = psnr(pred_np, clean_np)
             history["step"].append(s)
             history["loss"].append(float(loss))
@@ -229,11 +255,18 @@ def run_deq_experiment(
 
     if save_dir:
         save_dir.mkdir(parents=True, exist_ok=True)
-        Image.fromarray((clean_np * 255.0).astype(np.uint8)).save(save_dir / "target.png")
-
         pred = readout(z_curr, params)
-        recon_np = np.clip(np.asarray(pred[0, 0]) * 255.0, 0, 255).astype(np.uint8)
-        Image.fromarray(recon_np).save(save_dir / "deq_recon.png")
+        pred_np = np.asarray(pred[0])
+
+        if out_channels == 1:
+            Image.fromarray((clean_np[0] * 255.0).astype(np.uint8)).save(save_dir / "target.png")
+            recon_img = np.clip(pred_np[0] * 255.0, 0, 255).astype(np.uint8)
+            Image.fromarray(recon_img).save(save_dir / "deq_recon.png")
+        else:
+            target_rgb = np.clip(np.transpose(clean_np, (1, 2, 0)) * 255.0, 0, 255).astype(np.uint8)
+            recon_rgb = np.clip(np.transpose(pred_np, (1, 2, 0)) * 255.0, 0, 255).astype(np.uint8)
+            Image.fromarray(target_rgb).save(save_dir / "target.png")
+            Image.fromarray(recon_rgb).save(save_dir / "deq_recon.png")
 
         hidden_np = np.asarray(z_curr[0])
         seg_rgb = extract_segmentation_pca(hidden_np)
