@@ -71,6 +71,7 @@ def deq_energy(
     cond: jax.Array,
     y: jax.Array,
     rho: float = 1.0,
+    tv_weight: float = 0.05,
 ) -> jax.Array:
     batch_size = z_eq.shape[0]
     pred_y = readout(z_eq, params)
@@ -80,7 +81,13 @@ def deq_energy(
     delta = nca_cond_delta(z_eq, cond, params)
     shifted = delta + dual_eq / rho
     loss_eq = 0.5 * rho * jnp.sum(shifted * shifted) / batch_size
-    return loss_sup + loss_eq
+
+    # Edge-preserving spatial Total Variation penalty on hidden states
+    diff_x = z_eq[:, :, :, 1:] - z_eq[:, :, :, :-1]
+    diff_y = z_eq[:, :, 1:, :] - z_eq[:, :, :-1, :]
+    loss_tv = tv_weight * (jnp.sum(jnp.sqrt(diff_x ** 2 + 1e-6)) + jnp.sum(jnp.sqrt(diff_y ** 2 + 1e-6))) / batch_size
+
+    return loss_sup + loss_eq + loss_tv
 
 
 def settle_deq_pcalm(
@@ -89,18 +96,19 @@ def settle_deq_pcalm(
     cond: jax.Array,
     y: jax.Array,
     *,
-    steps: int = 12,
+    steps: int = 15,
     inner_steps: int = 3,
     state_lr: float = 0.05,
     rho: float = 1.0,
     alpha: float = 0.1,
+    tv_weight: float = 0.05,
 ) -> tuple[jax.Array, jax.Array]:
     z = z_init
     duals = jnp.zeros_like(z)
 
     def inner_step(z_curr, dual_curr):
         def energy(zc):
-            return deq_energy(params, zc, dual_curr, cond, y, rho=rho)
+            return deq_energy(params, zc, dual_curr, cond, y, rho=rho, tv_weight=tv_weight)
 
         grad_fn = jax.grad(energy)
 
@@ -130,16 +138,17 @@ def compute_deq_grads(
     cond: jax.Array,
     y: jax.Array,
     *,
-    steps: int = 12,
+    steps: int = 15,
     inner_steps: int = 3,
     state_lr: float = 0.05,
     rho: float = 1.0,
     alpha: float = 0.1,
+    tv_weight: float = 0.05,
 ) -> tuple[dict, jax.Array, jax.Array]:
     batch_size = y.shape[0]
     z_eq, dual_eq = settle_deq_pcalm(
         params, z_init, cond, y,
-        steps=steps, inner_steps=inner_steps, state_lr=state_lr, rho=rho, alpha=alpha,
+        steps=steps, inner_steps=inner_steps, state_lr=state_lr, rho=rho, alpha=alpha, tv_weight=tv_weight,
     )
 
     pred_y = readout(z_eq, params)
@@ -149,7 +158,7 @@ def compute_deq_grads(
     dual_eq_stop = jax.lax.stop_gradient(dual_eq)
 
     def p_loss(p):
-        return deq_energy(p, z_eq_stop, dual_eq_stop, cond, y, rho=rho)
+        return deq_energy(p, z_eq_stop, dual_eq_stop, cond, y, rho=rho, tv_weight=tv_weight)
 
     grads = jax.grad(p_loss)(params)
     return grads, loss, z_eq
@@ -161,11 +170,12 @@ def run_deq_experiment(
     channels: int = 16,
     hidden_dim: int = 64,
     size: int = 32,
-    deq_steps: int = 10,
+    deq_steps: int = 15,
     inner_steps: int = 3,
     state_lr: float = 0.05,
     alpha: float = 0.1,
     rho: float = 1.0,
+    tv_weight: float = 0.05,
     seed: int = 42,
     save_dir=None,
 ) -> dict:
@@ -193,7 +203,7 @@ def run_deq_experiment(
     def train_step(p, opt_s, zc):
         grads, loss, z_next = compute_deq_grads(
             p, zc, cond, y_target,
-            steps=deq_steps, inner_steps=inner_steps, state_lr=state_lr, rho=rho, alpha=alpha,
+            steps=deq_steps, inner_steps=inner_steps, state_lr=state_lr, rho=rho, alpha=alpha, tv_weight=tv_weight,
         )
         p, opt_s = adam_apply(p, grads, opt_s, lr=lr)
         return p, opt_s, loss, z_next

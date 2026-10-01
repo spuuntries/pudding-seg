@@ -98,6 +98,7 @@ def run_modal_deq(
     state_lr: float = 0.05,
     alpha: float = 0.1,
     rho: float = 1.0,
+    tv_weight: float = 0.05,
 ):
     import sys
     sys.path.insert(0, "/root")
@@ -107,7 +108,7 @@ def run_modal_deq(
     out_dir = Path("/root/results") / f"deq_conditioned_{size}x{size}_c{channels}"
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    print(f"=== Running Modal GPU Conditioned DEQ PC-ALM on A10G (size={size}x{size}) ===")
+    print(f"=== Running Modal GPU Conditioned DEQ PC-ALM on A10G (size={size}x{size}, tv_weight={tv_weight}) ===")
     hist = run_deq_experiment(
         steps=steps,
         lr=lr,
@@ -119,6 +120,7 @@ def run_modal_deq(
         state_lr=state_lr,
         alpha=alpha,
         rho=rho,
+        tv_weight=tv_weight,
         save_dir=out_dir,
     )
     volume.commit()
@@ -138,7 +140,8 @@ def main(
     steps: int = 150,
     size: int = 32,
     channels: int = 16,
-    deq_steps: int = 10,
+    deq_steps: int = 15,
+    tv_weight: float = 0.05,
 ):
     from pathlib import Path
     if mode == "deq":
@@ -147,6 +150,7 @@ def main(
             size=size,
             channels=channels,
             deq_steps=deq_steps,
+            tv_weight=tv_weight,
         )
         local_out = Path("results/deq_conditioned")
     else:
@@ -159,6 +163,13 @@ def main(
         local_out = Path("results/nca_deq")
 
     local_out.mkdir(parents=True, exist_ok=True)
+    import time
     for name, b in res["images"].items():
-        (local_out / name).write_bytes(b)
+        out_f = (local_out / name).resolve()
+        for _ in range(5):
+            try:
+                out_f.write_bytes(b)
+                break
+            except OSError:
+                time.sleep(0.3)
     print(f"\n[Local] Downloaded all result images to {local_out.resolve()}")
