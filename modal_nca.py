@@ -202,11 +202,11 @@ def run_modal_pool(
 @app.local_entrypoint()
 def main(
     image: str = "camera",
-    mode: str = "pool",
-    steps: int = 400,
+    mode: str = "deq",
+    steps: int = 180,
     size: int = 48,
     channels: int = 16,
-    deq_steps: int = 12,
+    deq_steps: int = 15,
     tv_weight: float = 0.05,
     clusters: int = 4,
     damage_prob: float = 0.5,
