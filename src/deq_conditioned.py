@@ -15,16 +15,36 @@ class DEQModelParams:
         self.b_out = b_out  # (out_c, 1, 1)
 
 
+def perceive_dilated(z: jax.Array, dilations: tuple[int, ...] = (1, 2, 4)) -> jax.Array:
+    """Multiscale perception using Sobel filters at multiple dilation rates."""
+    feats = [z]
+    for d in dilations:
+        tl = jnp.roll(jnp.roll(z, d, axis=2), d, axis=3)
+        tc = jnp.roll(z, d, axis=2)
+        tr = jnp.roll(jnp.roll(z, d, axis=2), -d, axis=3)
+        ml = jnp.roll(z, d, axis=3)
+        mr = jnp.roll(z, -d, axis=3)
+        bl = jnp.roll(jnp.roll(z, -d, axis=2), d, axis=3)
+        bc = jnp.roll(z, -d, axis=2)
+        br = jnp.roll(jnp.roll(z, -d, axis=2), -d, axis=3)
+        dx = (-tl + tr - 2.0 * ml + 2.0 * mr - bl + br) / 8.0
+        dy = (-tl - 2.0 * tc - tr + bl + 2.0 * bc + br) / 8.0
+        feats.extend([dx, dy])
+    return jnp.concatenate(feats, axis=1)
+
+
 def init_conditioned_deq(
     key: jax.Array,
     channels: int = 16,
-    hidden_dim: int = 64,
+    hidden_dim: int = 96,
     in_cond_dim: int = 2,  # e.g. (x, y) coordinates
     out_channels: int = 1,
+    dilations: tuple[int, ...] = (1, 2, 4),
 ):
-    k1, k2, k3 = jax.random.split(key, 3)
-    # Perception has 3*channels + in_cond_dim
-    total_in = 3 * channels + in_cond_dim
+    k1, k2 = jax.random.split(key)
+    # Perception has channels * (1 + 2 * len(dilations)) + in_cond_dim
+    num_perceive = channels * (1 + 2 * len(dilations))
+    total_in = num_perceive + in_cond_dim
     std1 = 1.0 / math.sqrt(total_in)
 
     w1 = jax.random.normal(k1, (hidden_dim, total_in, 1, 1)) * std1
@@ -44,9 +64,9 @@ def init_conditioned_deq(
     }
 
 
-def nca_cond_delta(z: jax.Array, cond: jax.Array, params: dict) -> jax.Array:
-    """NCA step conditioned on input x (e.g. coordinates/noise)."""
-    p = perceive(z)  # (B, 3*C, H, W)
+def nca_cond_delta(z: jax.Array, cond: jax.Array, params: dict, dilations: tuple[int, ...] = (1, 2, 4)) -> jax.Array:
+    """NCA step conditioned on input x with multiscale dilated perception."""
+    p = perceive_dilated(z, dilations=dilations)
     if cond.shape[0] != p.shape[0]:
         cond_b = jnp.broadcast_to(cond, (p.shape[0], *cond.shape[1:]))
     else:

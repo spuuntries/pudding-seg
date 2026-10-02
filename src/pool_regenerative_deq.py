@@ -81,7 +81,7 @@ def run_pool_experiment(
     steps: int = 200,
     lr: float = 3e-3,
     channels: int = 16,
-    hidden_dim: int = 64,
+    hidden_dim: int = 96,
     size: int = 48,
     deq_steps: int = 15,
     inner_steps: int = 3,
@@ -139,7 +139,7 @@ def run_pool_experiment(
             def flow_step(zc, _):
                 delta = nca_cond_delta(zc, cond, p_curr)
                 return zc + 0.5 * delta, None
-            z_flow, _ = jax.lax.scan(flow_step, batch_z_dam[:2], xs=None, length=8)
+            z_flow, _ = jax.lax.scan(flow_step, batch_z_dam[:2], xs=None, length=12)
             l_flow = jnp.mean((z_flow - z_target_stop) ** 2)
             pred_flow = readout(z_flow, p_curr)
             l_recon = jnp.mean((pred_flow - y_batch[:2]) ** 2)
