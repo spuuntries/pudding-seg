@@ -213,12 +213,22 @@ def load_target_image(image_name: str = "coins", size: int = 48) -> tuple[np.nda
         return np.transpose(arr, (2, 0, 1)), arr.shape[2]
 
 
+def make_fourier_coords(size: int, octaves: int = 2) -> np.ndarray:
+    """Generates normalized coordinate grid with gentle multiscale Fourier features."""
+    yy, xx = np.mgrid[:size, :size].astype(np.float32) / float(size)
+    feats = [xx, yy]
+    for k in range(octaves):
+        freq = float(2 ** k) * np.pi
+        feats.extend([np.sin(freq * xx), np.cos(freq * xx), np.sin(freq * yy), np.cos(freq * yy)])
+    return np.stack(feats, axis=0)[None, ...].astype(np.float32)
+
+
 def run_deq_experiment(
     image_name: str = "coins",
     steps: int = 150,
     lr: float = 3e-3,
     channels: int = 16,
-    hidden_dim: int = 64,
+    hidden_dim: int = 96,
     size: int = 48,
     deq_steps: int = 15,
     inner_steps: int = 3,
@@ -244,12 +254,12 @@ def run_deq_experiment(
     clean_np, out_channels = load_target_image(image_name, size=size)
     y_target = jnp.asarray(clean_np[None, ...], dtype=jnp.float32)
 
-    # Condition: normalized 2D coordinate grid (x, y)
-    yy, xx = np.mgrid[:size, :size].astype(np.float32) / float(size)
-    cond_np = np.stack([xx, yy], axis=0)[None, ...]  # (1, 2, H, W)
+    # Condition: normalized 2D coordinate grid + gentle Fourier features (2 octaves)
+    cond_np = make_fourier_coords(size, octaves=2)
     cond = jnp.asarray(cond_np)
+    in_cond_dim = cond.shape[1]
 
-    params = init_conditioned_deq(k_net, channels=channels, hidden_dim=hidden_dim, in_cond_dim=2, out_channels=out_channels)
+    params = init_conditioned_deq(k_net, channels=channels, hidden_dim=hidden_dim, in_cond_dim=in_cond_dim, out_channels=out_channels)
     opt_state = adam_init(params)
     z_curr = jax.random.normal(k_init, (1, channels, size, size)) * 0.05
 

@@ -12,6 +12,7 @@ from .deq_conditioned import (
     deq_energy,
     init_conditioned_deq,
     load_target_image,
+    make_fourier_coords,
     nca_cond_delta,
     readout,
     settle_deq_pcalm,
@@ -99,12 +100,12 @@ def run_pool_experiment(
     y_target = jnp.asarray(clean_np[None, ...], dtype=jnp.float32)
     y_batch = jnp.broadcast_to(y_target, (batch_size, out_channels, size, size))
 
-    # Condition: normalized 2D coordinate grid (x, y)
-    yy, xx = np.mgrid[:size, :size].astype(np.float32) / float(size)
-    cond_np = np.stack([xx, yy], axis=0)[None, ...]
+    # Condition: normalized 2D coordinate grid + gentle Fourier features (2 octaves)
+    cond_np = make_fourier_coords(size, octaves=2)
     cond = jnp.asarray(cond_np)
+    in_cond_dim = cond.shape[1]
 
-    params = init_conditioned_deq(k_net, channels=channels, hidden_dim=hidden_dim, in_cond_dim=2, out_channels=out_channels)
+    params = init_conditioned_deq(k_net, channels=channels, hidden_dim=hidden_dim, in_cond_dim=in_cond_dim, out_channels=out_channels)
     opt_state = adam_init(params)
 
     # Initialize persistent pool with small noise
