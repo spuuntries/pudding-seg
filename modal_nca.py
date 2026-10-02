@@ -159,9 +159,9 @@ def run_modal_pool(
     size: int = 48,
     channels: int = 16,
     lr: float = 2e-3,
-    deq_steps: int = 12,
-    state_lr: float = 0.05,
-    tv_weight: float = 0.05,
+    deq_steps: int = 32,
+    step_size: float = 0.5,
+    tv_weight: float = 0.02,
 ):
     import sys
     sys.path.insert(0, "/root")
@@ -181,7 +181,7 @@ def run_modal_pool(
         channels=channels,
         size=size,
         deq_steps=deq_steps,
-        state_lr=state_lr,
+        step_size=step_size,
         tv_weight=tv_weight,
         save_dir=out_dir,
     )

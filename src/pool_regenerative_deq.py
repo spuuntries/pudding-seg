@@ -74,37 +74,24 @@ def apply_pool_damage(key: jax.Array, batch_z: jax.Array, num_damaged: int = 2) 
     return damaged
 
 
-def relax_deq_batch(
+def rollout_blind_nca(
     params: dict,
     batch_z: jax.Array,
     cond: jax.Array,
-    y: jax.Array,
-    steps: int = 15,
-    state_lr: float = 0.05,
-    rho: float = 1.0,
-    tv_weight: float = 0.05,
+    key: jax.Array,
+    steps: int = 32,
+    step_size: float = 0.5,
 ) -> jax.Array:
-    """Relaxes batch of states toward equilibrium minimizing energy."""
-    b = batch_z.shape[0]
-
-    def energy(zc):
-        pred_y = readout(zc, params)
-        loss_sup = 0.5 * jnp.sum((pred_y - y) ** 2) / b
+    """True Distill-style blind forward rollout with stochastic cell updates."""
+    def step_fn(zc, k):
         delta = nca_cond_delta(zc, cond, params)
-        loss_eq = 0.5 * rho * jnp.sum(delta ** 2) / b
-        diff_x = zc[:, :, :, 1:] - zc[:, :, :, :-1]
-        diff_y = zc[:, :, 1:, :] - zc[:, :, :-1, :]
-        loss_tv = tv_weight * (jnp.sum(jnp.sqrt(diff_x ** 2 + 1e-6)) + jnp.sum(jnp.sqrt(diff_y ** 2 + 1e-6))) / b
-        return loss_sup + loss_eq + loss_tv
+        mask = jax.random.bernoulli(k, p=0.5, shape=(zc.shape[0], 1, zc.shape[2], zc.shape[3])).astype(jnp.float32)
+        z_next = zc + step_size * delta * mask
+        return z_next, None
 
-    grad_fn = jax.grad(energy)
-
-    def step(zc, _):
-        g = grad_fn(zc)
-        return zc - state_lr * g, None
-
-    z_settled, _ = jax.lax.scan(step, batch_z, xs=None, length=steps)
-    return z_settled
+    keys = jax.random.split(key, steps)
+    z_final, _ = jax.lax.scan(step_fn, batch_z, keys)
+    return z_final
 
 
 def run_pool_experiment(
@@ -116,10 +103,9 @@ def run_pool_experiment(
     channels: int = 16,
     hidden_dim: int = 64,
     size: int = 48,
-    deq_steps: int = 12,
-    state_lr: float = 0.05,
-    rho: float = 1.0,
-    tv_weight: float = 0.05,
+    deq_steps: int = 32,
+    step_size: float = 0.5,
+    tv_weight: float = 0.02,
     num_damaged_per_batch: int = 2,
     seed: int = 42,
     save_dir: Path | None = None,
@@ -143,7 +129,7 @@ def run_pool_experiment(
 
     @jax.jit
     def pool_train_step(p, opt_s, pool_state, k):
-        k_idx, k_dam, k_seed = jax.random.split(k, 3)
+        k_idx, k_dam, k_seed, k_roll = jax.random.split(k, 4)
         # Sample random batch
         idx = jax.random.choice(k_idx, pool_size, (batch_size,), replace=False)
         batch_z = pool_state[idx]
@@ -158,17 +144,20 @@ def run_pool_experiment(
         # Apply decimation damage to first num_damaged samples
         batch_z_dam = apply_pool_damage(k_dam, batch_z, num_damaged=num_damaged_per_batch)
 
-        # DEQ Relaxation & gradient computation
+        # Blind rollout & gradient computation
         def loss_fn(p_curr):
-            z_settled = relax_deq_batch(
-                p_curr, batch_z_dam, cond, y_target,
-                steps=deq_steps, state_lr=state_lr, rho=rho, tv_weight=tv_weight,
+            z_settled = rollout_blind_nca(
+                p_curr, batch_z_dam, cond, k_roll,
+                steps=deq_steps, step_size=step_size,
             )
             pred_y = readout(z_settled, p_curr)
             l_sup = 0.5 * jnp.mean((pred_y - y_target) ** 2)
-            delta = nca_cond_delta(z_settled, cond, p_curr)
-            l_eq = 0.5 * rho * jnp.mean(delta ** 2)
-            return l_sup + l_eq, z_settled
+
+            diff_x = z_settled[:, :, :, 1:] - z_settled[:, :, :, :-1]
+            diff_y = z_settled[:, :, 1:, :] - z_settled[:, :, :-1, :]
+            l_tv = tv_weight * (jnp.mean(jnp.sqrt(diff_x ** 2 + 1e-6)) + jnp.mean(jnp.sqrt(diff_y ** 2 + 1e-6)))
+
+            return l_sup + l_tv, z_settled
 
         (total_loss, z_final), grads = jax.value_and_grad(loss_fn, has_aux=True)(p)
         p, opt_s = adam_apply(p, grads, opt_s, lr=lr)
@@ -227,7 +216,7 @@ def run_pool_experiment(
         Image.fromarray(discrete_rgb).save(save_dir / "deq_discrete_seg.png")
 
         # === DECIMATION & REGENERATION BATTERY ===
-        run_decimation_battery(params, z_eq, cond, clean_np, out_channels, size, save_dir, rho=rho, tv_weight=tv_weight, state_lr=state_lr)
+        run_decimation_battery(params, z_eq, cond, clean_np, out_channels, size, save_dir, step_size=step_size)
 
     return history
 
@@ -240,28 +229,18 @@ def run_decimation_battery(
     out_channels: int,
     size: int,
     save_dir: Path,
-    rho: float = 1.0,
-    tv_weight: float = 0.05,
-    state_lr: float = 0.05,
+    step_size: float = 0.5,
 ):
     """Executes Distill-style decimation tests: Half-wipe, Crater hole, and Pepper noise."""
     print("=== Running Distill-style Decimation and Regeneration Battery ===")
 
-    def autonomous_relax(z_start, n_steps=60):
-        def energy(zc):
-            delta = nca_cond_delta(zc, cond, params)
-            loss_eq = 0.5 * rho * jnp.sum(delta ** 2) / zc.shape[0]
-            diff_x = zc[:, :, :, 1:] - zc[:, :, :, :-1]
-            diff_y = zc[:, :, 1:, :] - zc[:, :, :-1, :]
-            loss_tv = tv_weight * (jnp.sum(jnp.sqrt(diff_x ** 2 + 1e-6)) + jnp.sum(jnp.sqrt(diff_y ** 2 + 1e-6))) / zc.shape[0]
-            return loss_eq + loss_tv
-
-        g_fn = jax.grad(energy)
-        zc = z_start
-        snapshots = [zc]
+    def autonomous_relax(z_start, n_steps=60, step_size=0.5):
+        snapshots = [z_start]
         checkpoint_steps = [10, 20, 40, n_steps]
+        zc = z_start
         for s in range(1, n_steps + 1):
-            zc = zc - state_lr * g_fn(zc)
+            delta = nca_cond_delta(zc, cond, params)
+            zc = zc + step_size * delta
             if s in checkpoint_steps:
                 snapshots.append(zc)
         return snapshots
