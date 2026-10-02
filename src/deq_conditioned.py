@@ -99,7 +99,9 @@ def deq_energy(
 ) -> jax.Array:
     batch_size = z_eq.shape[0]
     pred_y = readout(z_eq, params)
-    loss_sup = 0.5 * jnp.sum((pred_y - y) ** 2) / batch_size
+    loss_sup_l2 = 0.5 * jnp.sum((pred_y - y) ** 2) / batch_size
+    loss_sup_l1 = 0.5 * jnp.sum(jnp.sqrt((pred_y - y) ** 2 + 1e-6)) / batch_size
+    loss_sup = loss_sup_l2 + loss_sup_l1
 
     # Equilibrium constraint: Delta_z(z*, x) = 0
     delta = nca_cond_delta(z_eq, cond, params)
@@ -176,7 +178,7 @@ def compute_deq_grads(
     )
 
     pred_y = readout(z_eq, params)
-    loss = 0.5 * jnp.sum((pred_y - y) ** 2) / batch_size
+    loss = (0.5 * jnp.sum((pred_y - y) ** 2) + 0.5 * jnp.sum(jnp.sqrt((pred_y - y) ** 2 + 1e-6))) / batch_size
 
     z_eq_stop = jax.lax.stop_gradient(z_eq)
     dual_eq_stop = jax.lax.stop_gradient(dual_eq)

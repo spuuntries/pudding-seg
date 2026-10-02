@@ -161,7 +161,8 @@ def run_modal_pool(
     lr: float = 3e-3,
     deq_steps: int = 15,
     state_lr: float = 0.05,
-    tv_weight: float = 0.05,
+    tv_weight: float = 0.005,
+    octaves: int = 6,
 ):
     import sys
     sys.path.insert(0, "/root")
@@ -171,7 +172,7 @@ def run_modal_pool(
     out_dir = Path("/root/results") / f"pool_regen_{image_name}_{size}x{size}"
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    print(f"=== Running Distill Pool + DEQ PC-ALM on '{image_name}' on A10G (size={size}x{size}, steps={steps}) ===")
+    print(f"=== Running Distill Pool + DEQ PC-ALM on '{image_name}' on A10G (size={size}x{size}, steps={steps}, octaves={octaves}, tv={tv_weight}) ===")
     hist = run_pool_experiment(
         image_name=image_name,
         pool_size=pool_size,
@@ -183,6 +184,7 @@ def run_modal_pool(
         deq_steps=deq_steps,
         state_lr=state_lr,
         tv_weight=tv_weight,
+        octaves=octaves,
         save_dir=out_dir,
     )
     volume.commit()
@@ -208,7 +210,8 @@ def main(
     size: int = 48,
     channels: int = 16,
     deq_steps: int = 15,
-    tv_weight: float = 0.05,
+    tv_weight: float = 0.005,
+    octaves: int = 6,
     clusters: int = 4,
     damage_prob: float = 0.5,
     pool_size: int = 32,
@@ -225,6 +228,7 @@ def main(
             channels=channels,
             deq_steps=deq_steps,
             tv_weight=tv_weight,
+            octaves=octaves,
         )
         local_out = Path(f"results/pool_{image}")
     elif mode == "deq":

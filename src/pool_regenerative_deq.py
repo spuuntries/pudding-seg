@@ -92,7 +92,8 @@ def run_pool_experiment(
     state_lr: float = 0.05,
     alpha: float = 0.1,
     rho: float = 1.0,
-    tv_weight: float = 0.05,
+    tv_weight: float = 0.005,
+    octaves: int = 6,
     seed: int = 42,
     save_dir: Path | None = None,
 ) -> dict:
@@ -103,8 +104,8 @@ def run_pool_experiment(
     y_target = jnp.asarray(clean_np[None, ...], dtype=jnp.float32)
     y_batch = jnp.broadcast_to(y_target, (batch_size, out_channels, size, size))
 
-    # Condition: normalized 2D coordinate grid + gentle Fourier features (4 octaves)
-    cond_np = make_fourier_coords(size, octaves=4)
+    # Condition: normalized 2D coordinate grid + high-resolution Fourier features (6 octaves)
+    cond_np = make_fourier_coords(size, octaves=octaves)
     cond = jnp.asarray(cond_np)
     in_cond_dim = cond.shape[1]
 
@@ -154,7 +155,17 @@ def run_pool_experiment(
             z_final = z_traj[n_steps - 1]
             l_flow = jnp.mean((z_final - z_target_stop) ** 2)
             pred_flow = readout(z_final, p_curr)
-            l_recon = jnp.mean((pred_flow - y_batch[:2]) ** 2)
+
+            # High-frequency sharpening: L2 + L1 + Sobel edge gradients
+            l_recon_l2 = jnp.mean((pred_flow - y_batch[:2]) ** 2)
+            l_recon_l1 = jnp.mean(jnp.sqrt((pred_flow - y_batch[:2]) ** 2 + 1e-6))
+            gx_pred = pred_flow[:, :, :, 1:] - pred_flow[:, :, :, :-1]
+            gy_pred = pred_flow[:, :, 1:, :] - pred_flow[:, :, :-1, :]
+            gx_y = y_batch[:2, :, :, 1:] - y_batch[:2, :, :, :-1]
+            gy_y = y_batch[:2, :, 1:, :] - y_batch[:2, :, :-1, :]
+            l_edge = jnp.mean(jnp.sqrt((gx_pred - gx_y) ** 2 + 1e-6)) + jnp.mean(jnp.sqrt((gy_pred - gy_y) ** 2 + 1e-6))
+            l_recon = l_recon_l2 + l_recon_l1 + 0.5 * l_edge
+
             delta_final = nca_cond_delta(z_final, cond, p_curr)
             l_stationary = jnp.mean(delta_final ** 2)
             return l_flow + 1.0 * l_recon + 0.5 * l_stationary
@@ -252,7 +263,7 @@ def run_decimation_battery(
     size: int,
     save_dir: Path,
     rho: float = 1.0,
-    tv_weight: float = 0.05,
+    tv_weight: float = 0.005,
     state_lr: float = 0.05,
     deq_steps: int = 15,
     inner_steps: int = 3,
@@ -264,7 +275,7 @@ def run_decimation_battery(
     lam_max = compute_spectral_radius(params, z_eq, cond)
     print(f"[THEORY] Spectral radius of relaxation operator at z_eq: |lambda_max| = {lam_max:.4f}")
 
-    def forward_nca_relax(z_start, keep_mask, n_steps=28, step_size=0.5, min_steps=20, tol=1e-6):
+    def forward_nca_relax(z_start, keep_mask, n_steps=28, step_size=0.5, min_steps=18, tol=5e-6):
         """Autonomous NCA forward relaxation with DEQ residual convergence and dynamic linspace sampling."""
         history = [z_start]
         zc = z_start
@@ -312,7 +323,7 @@ def run_decimation_battery(
     mask_half = mask_half.at[:, :, :, size // 2:].set(0.0)
     z_half = z_eq * mask_half
 
-    snaps_half = forward_nca_relax(z_half, mask_half, n_steps=60, step_size=0.5)
+    snaps_half = forward_nca_relax(z_half, mask_half, n_steps=28, step_size=0.5, min_steps=18, tol=5e-6)
     imgs_half = [to_img(s) for s in snaps_half]
     if out_channels == 1:
         imgs_half = [np.stack([im, im, im], axis=-1) for im in imgs_half]
@@ -326,7 +337,7 @@ def run_decimation_battery(
     mask_circle = ((yy - cy) ** 2 + (xx - cx) ** 2 >= r ** 2).astype(np.float32)[None, None, ...]
     z_circle = z_eq * jnp.asarray(mask_circle)
 
-    snaps_circle = forward_nca_relax(z_circle, jnp.asarray(mask_circle), n_steps=60, step_size=0.5)
+    snaps_circle = forward_nca_relax(z_circle, jnp.asarray(mask_circle), n_steps=28, step_size=0.5, min_steps=18, tol=5e-6)
     imgs_circle = [to_img(s) for s in snaps_circle]
     if out_channels == 1:
         imgs_circle = [np.stack([im, im, im], axis=-1) for im in imgs_circle]
@@ -338,7 +349,7 @@ def run_decimation_battery(
     mask_pepper = (np.random.rand(1, 1, size, size) > 0.5).astype(np.float32)
     z_pepper = z_eq * jnp.asarray(mask_pepper)
 
-    snaps_pepper = forward_nca_relax(z_pepper, jnp.asarray(mask_pepper), n_steps=60, step_size=0.5)
+    snaps_pepper = forward_nca_relax(z_pepper, jnp.asarray(mask_pepper), n_steps=28, step_size=0.5, min_steps=18, tol=5e-6)
     imgs_pepper = [to_img(s) for s in snaps_pepper]
     if out_channels == 1:
         imgs_pepper = [np.stack([im, im, im], axis=-1) for im in imgs_pepper]
