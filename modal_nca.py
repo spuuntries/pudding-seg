@@ -153,15 +153,15 @@ def run_modal_deq(
 )
 def run_modal_pool(
     image_name: str = "camera",
-    steps: int = 400,
-    pool_size: int = 32,
-    batch_size: int = 8,
+    steps: int = 250,
+    pool_size: int = 16,
+    batch_size: int = 4,
     size: int = 48,
     channels: int = 16,
-    lr: float = 2e-3,
-    deq_steps: int = 32,
-    step_size: float = 0.5,
-    tv_weight: float = 0.02,
+    lr: float = 3e-3,
+    deq_steps: int = 15,
+    state_lr: float = 0.05,
+    tv_weight: float = 0.05,
 ):
     import sys
     sys.path.insert(0, "/root")
@@ -171,7 +171,7 @@ def run_modal_pool(
     out_dir = Path("/root/results") / f"pool_regen_{image_name}_{size}x{size}"
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    print(f"=== Running Regenerative Sample-Pool DEQ on '{image_name}' on A10G (size={size}x{size}, steps={steps}) ===")
+    print(f"=== Running Distill Pool + DEQ PC-ALM on '{image_name}' on A10G (size={size}x{size}, steps={steps}) ===")
     hist = run_pool_experiment(
         image_name=image_name,
         pool_size=pool_size,
@@ -181,7 +181,7 @@ def run_modal_pool(
         channels=channels,
         size=size,
         deq_steps=deq_steps,
-        step_size=step_size,
+        state_lr=state_lr,
         tv_weight=tv_weight,
         save_dir=out_dir,
     )
