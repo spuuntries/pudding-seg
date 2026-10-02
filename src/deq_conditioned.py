@@ -203,6 +203,9 @@ def run_deq_experiment(
     rho: float = 1.0,
     tv_weight: float = 0.05,
     n_clusters: int = 4,
+    damage_prob: float = 0.5,
+    damage_box: int = 14,
+    damage_warmup: int = 25,
     seed: int = 42,
     save_dir=None,
 ) -> dict:
@@ -212,7 +215,7 @@ def run_deq_experiment(
     from .nca_experiment import extract_discrete_segmentation, extract_segmentation_pca
 
     key = jax.random.PRNGKey(seed)
-    k_net, k_init = jax.random.split(key)
+    k_net, k_init, k_train = jax.random.split(key, 3)
 
     clean_np, out_channels = load_target_image(image_name, size=size)
     y_target = jnp.asarray(clean_np[None, ...], dtype=jnp.float32)
@@ -226,8 +229,18 @@ def run_deq_experiment(
     opt_state = adam_init(params)
     z_curr = jax.random.normal(k_init, (1, channels, size, size)) * 0.05
 
+    def apply_damage(k, z):
+        k_choice, k_pos = jax.random.split(k)
+        should_damage = jax.random.uniform(k_choice) < damage_prob
+        top = jax.random.randint(k_pos, (), 0, size - damage_box)
+        left = jax.random.randint(k_pos, (), 0, size - damage_box)
+        grid_y, grid_x = jnp.meshgrid(jnp.arange(size), jnp.arange(size), indexing="ij")
+        mask = ~((grid_y >= top) & (grid_y < top + damage_box) & (grid_x >= left) & (grid_x < left + damage_box))
+        mask = mask[None, None, :, :].astype(jnp.float32)
+        return jnp.where(should_damage, z * mask, z)
+
     @jax.jit
-    def train_step(p, opt_s, zc):
+    def train_step_clean(p, opt_s, zc):
         grads, loss, z_next = compute_deq_grads(
             p, zc, cond, y_target,
             steps=deq_steps, inner_steps=inner_steps, state_lr=state_lr, rho=rho, alpha=alpha, tv_weight=tv_weight,
@@ -235,12 +248,26 @@ def run_deq_experiment(
         p, opt_s = adam_apply(p, grads, opt_s, lr=lr)
         return p, opt_s, loss, z_next
 
+    @jax.jit
+    def train_step_damage(p, opt_s, zc, k):
+        zc_dam = apply_damage(k, zc)
+        grads, loss, z_next = compute_deq_grads(
+            p, zc_dam, cond, y_target,
+            steps=deq_steps, inner_steps=inner_steps, state_lr=state_lr, rho=rho, alpha=alpha, tv_weight=tv_weight,
+        )
+        p, opt_s = adam_apply(p, grads, opt_s, lr=lr)
+        return p, opt_s, loss, z_next
+
     history = {"step": [], "loss": [], "psnr": []}
-    print(f"=== Starting Conditioned DEQ PC-ALM on '{image_name}' (out_c={out_channels}, channels={channels}, steps={steps}, size={size}x{size}) ===")
+    print(f"=== Starting Conditioned DEQ PC-ALM on '{image_name}' (damage_prob={damage_prob}, out_c={out_channels}, channels={channels}, steps={steps}, size={size}x{size}) ===")
     t0 = time.time()
+    k_steps = jax.random.split(k_train, steps)
 
     for s in range(1, steps + 1):
-        params, opt_state, loss, z_curr = train_step(params, opt_state, z_curr)
+        if s <= damage_warmup or damage_prob <= 0.0:
+            params, opt_state, loss, z_curr = train_step_clean(params, opt_state, z_curr)
+        else:
+            params, opt_state, loss, z_curr = train_step_damage(params, opt_state, z_curr, k_steps[s - 1])
 
         if s % 10 == 0 or s == 1 or s == steps:
             pred = readout(z_curr, params)
@@ -283,5 +310,70 @@ def run_deq_experiment(
         np.save(save_dir / "cluster_labels.npy", labels_2d)
 
         print(f"Saved DEQ reconstruction, PCA maps, and {n_clusters}-cluster discrete masks to {save_dir}")
+
+        # Test self-healing / regeneration
+        box_size = max(8, size // 3)
+        r0, r1 = size // 2 - box_size // 2, size // 2 + box_size // 2
+        c0, c1 = size // 2 - box_size // 2, size // 2 + box_size // 2
+        z_damaged = z_curr.at[:, :, r0:r1, c0:c1].set(0.0)
+
+        # Autonomous equilibrium relaxation on ||Delta z||^2 + TV without y supervision
+        def heal_energy(zc):
+            delta = nca_cond_delta(zc, cond, params)
+            loss_eq = 0.5 * rho * jnp.sum(delta ** 2) / zc.shape[0]
+            diff_x = zc[:, :, :, 1:] - zc[:, :, :, :-1]
+            diff_y = zc[:, :, 1:, :] - zc[:, :, :-1, :]
+            loss_tv = tv_weight * (jnp.sum(jnp.sqrt(diff_x ** 2 + 1e-6)) + jnp.sum(jnp.sqrt(diff_y ** 2 + 1e-6))) / zc.shape[0]
+            return loss_eq + loss_tv
+
+        heal_grad = jax.grad(heal_energy)
+        z_healed = z_damaged
+        for _ in range(60):
+            z_healed = z_healed - state_lr * heal_grad(z_healed)
+
+        # Inpainting test: DEQ relaxation with supervision outside the hole
+        keep_mask = jnp.ones((1, 1, size, size), dtype=jnp.float32)
+        keep_mask = keep_mask.at[:, :, r0:r1, c0:c1].set(0.0)
+
+        def inpaint_energy(zc, dualc):
+            pred_y = readout(zc, params)
+            loss_sup = 0.5 * jnp.sum((keep_mask * (pred_y - y_target)) ** 2) / zc.shape[0]
+            delta = nca_cond_delta(zc, cond, params)
+            shifted = delta + dualc / rho
+            loss_eq = 0.5 * rho * jnp.sum(shifted * shifted) / zc.shape[0]
+            diff_x = zc[:, :, :, 1:] - zc[:, :, :, :-1]
+            diff_y = zc[:, :, 1:, :] - zc[:, :, :-1, :]
+            loss_tv = tv_weight * (jnp.sum(jnp.sqrt(diff_x ** 2 + 1e-6)) + jnp.sum(jnp.sqrt(diff_y ** 2 + 1e-6))) / zc.shape[0]
+            return loss_sup + loss_eq + loss_tv
+
+        inp_grad = jax.grad(inpaint_energy)
+        z_inp = z_damaged
+        dual_inp = jnp.zeros_like(z_inp)
+        for _ in range(deq_steps + 10):
+            for _ in range(inner_steps):
+                z_inp = z_inp - state_lr * inp_grad(z_inp, dual_inp)
+            r = nca_cond_delta(z_inp, cond, params)
+            dual_inp = dual_inp + alpha * r
+
+        # Save damaged, healed, and inpainted images
+        dam_pred = readout(z_damaged, params)
+        heal_pred = readout(z_healed, params)
+        inp_pred = readout(z_inp, params)
+        dam_np = np.asarray(dam_pred[0])
+        heal_np = np.asarray(heal_pred[0])
+        inp_np = np.asarray(inp_pred[0])
+
+        if out_channels == 1:
+            Image.fromarray(np.clip(dam_np[0] * 255.0, 0, 255).astype(np.uint8)).save(save_dir / "deq_damage_recon.png")
+            Image.fromarray(np.clip(heal_np[0] * 255.0, 0, 255).astype(np.uint8)).save(save_dir / "deq_healed_recon.png")
+            Image.fromarray(np.clip(inp_np[0] * 255.0, 0, 255).astype(np.uint8)).save(save_dir / "deq_inpaint_recon.png")
+        else:
+            Image.fromarray(np.clip(np.transpose(dam_np, (1, 2, 0)) * 255.0, 0, 255).astype(np.uint8)).save(save_dir / "deq_damage_recon.png")
+            Image.fromarray(np.clip(np.transpose(heal_np, (1, 2, 0)) * 255.0, 0, 255).astype(np.uint8)).save(save_dir / "deq_healed_recon.png")
+            Image.fromarray(np.clip(np.transpose(inp_np, (1, 2, 0)) * 255.0, 0, 255).astype(np.uint8)).save(save_dir / "deq_inpaint_recon.png")
+
+        healed_pca = extract_segmentation_pca(np.asarray(z_healed[0]))
+        Image.fromarray(healed_pca).save(save_dir / "deq_healed_pca.png")
+        print(f"Saved self-healing and inpainting tests to {save_dir}")
 
     return history

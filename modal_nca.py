@@ -102,6 +102,7 @@ def run_modal_deq(
     rho: float = 1.0,
     tv_weight: float = 0.05,
     clusters: int = 4,
+    damage_prob: float = 0.5,
 ):
     import sys
     sys.path.insert(0, "/root")
@@ -111,7 +112,7 @@ def run_modal_deq(
     out_dir = Path("/root/results") / f"deq_{image_name}_{size}x{size}_c{channels}"
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    print(f"=== Running Modal GPU Conditioned DEQ PC-ALM on '{image_name}' on A10G (size={size}x{size}, tv_weight={tv_weight}, clusters={clusters}) ===")
+    print(f"=== Running Modal GPU Conditioned DEQ PC-ALM on '{image_name}' on A10G (size={size}x{size}, tv_weight={tv_weight}, clusters={clusters}, damage_prob={damage_prob}) ===")
     hist = run_deq_experiment(
         image_name=image_name,
         steps=steps,
@@ -126,12 +127,17 @@ def run_modal_deq(
         rho=rho,
         tv_weight=tv_weight,
         n_clusters=clusters,
+        damage_prob=damage_prob,
         save_dir=out_dir,
     )
     volume.commit()
 
     images = {}
-    for name in ["target.png", "deq_recon.png", "deq_segmentation_pca.png", "deq_discrete_seg.png", "deq_cluster_masks.png"]:
+    for name in [
+        "target.png", "deq_recon.png", "deq_segmentation_pca.png",
+        "deq_discrete_seg.png", "deq_cluster_masks.png",
+        "deq_damage_recon.png", "deq_healed_recon.png", "deq_inpaint_recon.png", "deq_healed_pca.png"
+    ]:
         file_p = out_dir / name
         if file_p.is_file():
             images[name] = file_p.read_bytes()
@@ -149,6 +155,7 @@ def main(
     deq_steps: int = 15,
     tv_weight: float = 0.05,
     clusters: int = 4,
+    damage_prob: float = 0.5,
 ):
     from pathlib import Path
     if mode == "deq":
@@ -160,6 +167,7 @@ def main(
             deq_steps=deq_steps,
             tv_weight=tv_weight,
             clusters=clusters,
+            damage_prob=damage_prob,
         )
         local_out = Path(f"results/deq_{image}")
     else:
