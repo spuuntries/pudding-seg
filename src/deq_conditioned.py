@@ -47,7 +47,11 @@ def init_conditioned_deq(
 def nca_cond_delta(z: jax.Array, cond: jax.Array, params: dict) -> jax.Array:
     """NCA step conditioned on input x (e.g. coordinates/noise)."""
     p = perceive(z)  # (B, 3*C, H, W)
-    p_full = jnp.concatenate([p, cond], axis=1)  # (B, 3*C + cond_dim, H, W)
+    if cond.shape[0] != p.shape[0]:
+        cond_b = jnp.broadcast_to(cond, (p.shape[0], *cond.shape[1:]))
+    else:
+        cond_b = cond
+    p_full = jnp.concatenate([p, cond_b], axis=1)  # (B, 3*C + cond_dim, H, W)
 
     h = jnp.tensordot(p_full, params["w1"][:, :, 0, 0], axes=([1], [1]))
     h = jnp.transpose(h, (0, 3, 1, 2)) + params["b1"]

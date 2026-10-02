@@ -145,20 +145,88 @@ def run_modal_deq(
     return {"history": hist, "images": images}
 
 
-@app.local_entrypoint()
-def main(
-    image: str = "coins",
-    mode: str = "deq",
-    steps: int = 150,
+@app.function(
+    image=image,
+    gpu="A10G",
+    timeout=600,
+    volumes={"/root/results": volume},
+)
+def run_modal_pool(
+    image_name: str = "camera",
+    steps: int = 400,
+    pool_size: int = 32,
+    batch_size: int = 8,
     size: int = 48,
     channels: int = 16,
-    deq_steps: int = 15,
+    lr: float = 2e-3,
+    deq_steps: int = 12,
+    state_lr: float = 0.05,
+    tv_weight: float = 0.05,
+):
+    import sys
+    sys.path.insert(0, "/root")
+    from pathlib import Path
+    from src.pool_regenerative_deq import run_pool_experiment
+
+    out_dir = Path("/root/results") / f"pool_regen_{image_name}_{size}x{size}"
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    print(f"=== Running Regenerative Sample-Pool DEQ on '{image_name}' on A10G (size={size}x{size}, steps={steps}) ===")
+    hist = run_pool_experiment(
+        image_name=image_name,
+        pool_size=pool_size,
+        batch_size=batch_size,
+        steps=steps,
+        lr=lr,
+        channels=channels,
+        size=size,
+        deq_steps=deq_steps,
+        state_lr=state_lr,
+        tv_weight=tv_weight,
+        save_dir=out_dir,
+    )
+    volume.commit()
+
+    images = {}
+    for name in [
+        "target.png", "deq_recon.png", "deq_segmentation_pca.png", "deq_discrete_seg.png",
+        "regen_half_wipe_strip.png", "regen_crater_strip.png", "regen_pepper_strip.png"
+    ]:
+        file_p = out_dir / name
+        if file_p.is_file():
+            images[name] = file_p.read_bytes()
+
+    return {"history": hist, "images": images}
+
+
+@app.local_entrypoint()
+def main(
+    image: str = "camera",
+    mode: str = "pool",
+    steps: int = 400,
+    size: int = 48,
+    channels: int = 16,
+    deq_steps: int = 12,
     tv_weight: float = 0.05,
     clusters: int = 4,
     damage_prob: float = 0.5,
+    pool_size: int = 32,
+    batch_size: int = 8,
 ):
     from pathlib import Path
-    if mode == "deq":
+    if mode == "pool":
+        res = run_modal_pool.remote(
+            image_name=image,
+            steps=steps,
+            pool_size=pool_size,
+            batch_size=batch_size,
+            size=size,
+            channels=channels,
+            deq_steps=deq_steps,
+            tv_weight=tv_weight,
+        )
+        local_out = Path(f"results/pool_{image}")
+    elif mode == "deq":
         res = run_modal_deq.remote(
             image_name=image,
             steps=steps,
