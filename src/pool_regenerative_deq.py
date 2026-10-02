@@ -58,21 +58,24 @@ def create_damage_mask(key: jax.Array, h: int, w: int, damage_type: int) -> jax.
     return mask.astype(jnp.float32)
 
 
-def apply_pool_damage(key: jax.Array, batch_z: jax.Array, num_damaged: int = 2) -> jax.Array:
-    """Damages the first num_damaged samples in batch_z with severe decimation."""
+def apply_pool_damage(key: jax.Array, batch_z: jax.Array, num_damaged: int = 2) -> tuple[jax.Array, jax.Array]:
+    """Damages the first num_damaged samples in batch_z and returns damaged batch + keep masks."""
     b, c, h, w = batch_z.shape
     keys = jax.random.split(key, b)
 
     def damage_one(k, z_single, i):
         k_type, k_mask = jax.random.split(k)
         d_type = jax.random.randint(k_type, (), 0, 3)
+        # Dedicated half-wipe for sample 0 to ensure exposure every iteration
+        d_type = jnp.where(i == 0, 0, d_type)
         mask = create_damage_mask(k_mask, h, w, d_type)  # (H, W)
         mask = mask[None, :, :]  # (1, H, W)
-        return jnp.where(i < num_damaged, z_single * mask, z_single)
+        keep = jnp.where(i < num_damaged, mask, jnp.ones_like(mask))
+        return z_single * keep, keep
 
     indices = jnp.arange(b)
-    damaged = jax.vmap(damage_one)(keys, batch_z, indices)
-    return damaged
+    damaged, masks = jax.vmap(damage_one)(keys, batch_z, indices)
+    return damaged, masks
 
 
 def run_pool_experiment(
@@ -100,8 +103,8 @@ def run_pool_experiment(
     y_target = jnp.asarray(clean_np[None, ...], dtype=jnp.float32)
     y_batch = jnp.broadcast_to(y_target, (batch_size, out_channels, size, size))
 
-    # Condition: normalized 2D coordinate grid + gentle Fourier features (2 octaves)
-    cond_np = make_fourier_coords(size, octaves=2)
+    # Condition: normalized 2D coordinate grid + gentle Fourier features (4 octaves)
+    cond_np = make_fourier_coords(size, octaves=4)
     cond = jnp.asarray(cond_np)
     in_cond_dim = cond.shape[1]
 
@@ -113,7 +116,7 @@ def run_pool_experiment(
 
     @jax.jit
     def pool_train_step(p, opt_s, pool_state, k):
-        k_idx, k_dam, k_seed = jax.random.split(k, 3)
+        k_idx, k_dam, k_seed, k_n = jax.random.split(k, 4)
         idx = jax.random.choice(k_idx, pool_size, (batch_size,), replace=False)
         batch_z = pool_state[idx]
 
@@ -125,7 +128,7 @@ def run_pool_experiment(
         batch_z = batch_z.at[worst_in_batch].set(fresh_seed)
 
         # Apply Distill decimation damage to first 2 samples
-        batch_z_dam = apply_pool_damage(k_dam, batch_z, num_damaged=2)
+        batch_z_dam, batch_masks = apply_pool_damage(k_dam, batch_z, num_damaged=2)
 
         # Solve DEQ stationary state using PC-ALM Augmented Lagrangian
         deq_grads, total_loss, z_eq = compute_deq_grads(
@@ -134,17 +137,27 @@ def run_pool_experiment(
             state_lr=state_lr, rho=rho, alpha=alpha, tv_weight=tv_weight,
         )
 
-        # Attractor flow loss: train NCA MLP so that forward updates on damaged states move directly towards settled z_eq
+        # Matched inpainting flow loss with PINNED intact pixels: N ~ Uniform(16, 28)
         def flow_loss_fn(p_curr):
+            n_steps = jax.random.randint(k_n, (), 16, 29)
             z_target_stop = jax.lax.stop_gradient(z_eq[:2])
+            masks_target = batch_masks[:2]
+
             def flow_step(zc, _):
                 delta = nca_cond_delta(zc, cond, p_curr)
-                return zc + 0.5 * delta, None
-            z_flow, _ = jax.lax.scan(flow_step, batch_z_dam[:2], xs=None, length=40)
-            l_flow = jnp.mean((z_flow - z_target_stop) ** 2)
-            pred_flow = readout(z_flow, p_curr)
+                z_next = zc + 0.5 * delta
+                # Pin intact pixels during training just like at test time!
+                z_next = jnp.where(masks_target > 0.5, z_target_stop, z_next)
+                return z_next, z_next
+
+            _, z_traj = jax.lax.scan(flow_step, batch_z_dam[:2], xs=None, length=28)
+            z_final = z_traj[n_steps - 1]
+            l_flow = jnp.mean((z_final - z_target_stop) ** 2)
+            pred_flow = readout(z_final, p_curr)
             l_recon = jnp.mean((pred_flow - y_batch[:2]) ** 2)
-            return l_flow + 1.0 * l_recon
+            delta_final = nca_cond_delta(z_final, cond, p_curr)
+            l_stationary = jnp.mean(delta_final ** 2)
+            return l_flow + 1.0 * l_recon + 0.5 * l_stationary
 
         flow_val, flow_grads = jax.value_and_grad(flow_loss_fn)(p)
         combined_grads = jax.tree_util.tree_map(lambda g1, g2: g1 + 1.0 * g2, deq_grads, flow_grads)
@@ -211,6 +224,24 @@ def run_pool_experiment(
     return history
 
 
+def compute_spectral_radius(params: dict, z_eq: jax.Array, cond: jax.Array, n_iter: int = 15) -> float:
+    """Computes the spectral radius (top singular/eigenvalue) of the relaxation operator J at z_eq."""
+    key = jax.random.PRNGKey(0)
+    v = jax.random.normal(key, z_eq.shape)
+    v = v / (jnp.linalg.norm(v) + 1e-8)
+
+    def op(z):
+        return z + 0.5 * nca_cond_delta(z, cond, params)
+
+    for _ in range(n_iter):
+        _, jv = jax.jvp(op, (z_eq,), (v,))
+        norm = jnp.linalg.norm(jv)
+        v = jv / (norm + 1e-8)
+
+    _, jv = jax.jvp(op, (z_eq,), (v,))
+    return float(jnp.linalg.norm(jv))
+
+
 def run_decimation_battery(
     params: dict,
     z_eq: jax.Array,
@@ -227,22 +258,45 @@ def run_decimation_battery(
     inner_steps: int = 3,
     alpha: float = 0.1,
 ):
-    """Executes decimation tests using forward NCA relaxation while pinning intact pixels."""
+    """Executes decimation tests using forward NCA relaxation and Lyapunov energy descent."""
     print("=== Running Distill Decimation + Forward NCA Self-Healing Battery ===")
 
-    def inpaint_relax(z_start, keep_mask, n_steps=120, step_size=0.5):
-        snapshots = [z_start]
-        checkpoint_steps = [10, 30, 60, n_steps]
+    lam_max = compute_spectral_radius(params, z_eq, cond)
+    print(f"[THEORY] Spectral radius of relaxation operator at z_eq: |lambda_max| = {lam_max:.4f}")
+
+    def forward_nca_relax(z_start, keep_mask, n_steps=28, step_size=0.5, min_steps=20, tol=1e-6):
+        """Autonomous NCA forward relaxation with DEQ residual convergence and dynamic linspace sampling."""
+        history = [z_start]
         zc = z_start
+        dam_mask = 1.0 - keep_mask
+        residuals = []
 
         for s in range(1, n_steps + 1):
             delta = nca_cond_delta(zc, cond, params)
-            zc = zc + step_size * delta
+            res = float(jnp.mean((dam_mask * delta) ** 2))
+            residuals.append(res)
+
+            # Gentle landing factor after step 12 to prevent overshoot
+            effective_lr = step_size * (0.97 ** max(0, s - 12))
+            zc = zc + effective_lr * delta
             # Pin intact pixels to true settled equilibrium state
             zc = jnp.where(keep_mask > 0.5, z_eq, zc)
-            if s in checkpoint_steps:
-                snapshots.append(zc)
+            history.append(zc)
 
+            if s >= min_steps and res < tol:
+                break
+            if s >= min_steps + 4 and res > 1.5 * min(residuals[min_steps - 1:]):
+                break
+
+        # Best converged step within the valid trained horizon
+        valid_residuals = residuals[min_steps - 1:]
+        best_offset = int(np.argmin(valid_residuals))
+        best_step = (min_steps - 1) + best_offset + 1
+        t_final = min(best_step, len(history) - 1)
+        indices = np.linspace(0, t_final, 5, dtype=int)
+        print(f"[DEQ-RELAX] Converged at step {t_final}/{n_steps} (res: {residuals[t_final - 1]:.6f}) | linspace frames: {indices.tolist()}")
+
+        snapshots = [history[idx] for idx in indices]
         return snapshots
 
     def to_img(z_state):
@@ -258,7 +312,7 @@ def run_decimation_battery(
     mask_half = mask_half.at[:, :, :, size // 2:].set(0.0)
     z_half = z_eq * mask_half
 
-    snaps_half = inpaint_relax(z_half, mask_half, n_steps=120, step_size=0.5)
+    snaps_half = forward_nca_relax(z_half, mask_half, n_steps=60, step_size=0.5)
     imgs_half = [to_img(s) for s in snaps_half]
     if out_channels == 1:
         imgs_half = [np.stack([im, im, im], axis=-1) for im in imgs_half]
@@ -272,7 +326,7 @@ def run_decimation_battery(
     mask_circle = ((yy - cy) ** 2 + (xx - cx) ** 2 >= r ** 2).astype(np.float32)[None, None, ...]
     z_circle = z_eq * jnp.asarray(mask_circle)
 
-    snaps_circle = inpaint_relax(z_circle, jnp.asarray(mask_circle), n_steps=120, step_size=0.5)
+    snaps_circle = forward_nca_relax(z_circle, jnp.asarray(mask_circle), n_steps=60, step_size=0.5)
     imgs_circle = [to_img(s) for s in snaps_circle]
     if out_channels == 1:
         imgs_circle = [np.stack([im, im, im], axis=-1) for im in imgs_circle]
@@ -284,7 +338,7 @@ def run_decimation_battery(
     mask_pepper = (np.random.rand(1, 1, size, size) > 0.5).astype(np.float32)
     z_pepper = z_eq * jnp.asarray(mask_pepper)
 
-    snaps_pepper = inpaint_relax(z_pepper, jnp.asarray(mask_pepper), n_steps=120, step_size=0.5)
+    snaps_pepper = forward_nca_relax(z_pepper, jnp.asarray(mask_pepper), n_steps=60, step_size=0.5)
     imgs_pepper = [to_img(s) for s in snaps_pepper]
     if out_channels == 1:
         imgs_pepper = [np.stack([im, im, im], axis=-1) for im in imgs_pepper]

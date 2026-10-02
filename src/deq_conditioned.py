@@ -213,7 +213,7 @@ def load_target_image(image_name: str = "coins", size: int = 48) -> tuple[np.nda
         return np.transpose(arr, (2, 0, 1)), arr.shape[2]
 
 
-def make_fourier_coords(size: int, octaves: int = 2) -> np.ndarray:
+def make_fourier_coords(size: int, octaves: int = 4) -> np.ndarray:
     """Generates normalized coordinate grid with gentle multiscale Fourier features."""
     yy, xx = np.mgrid[:size, :size].astype(np.float32) / float(size)
     feats = [xx, yy]
@@ -254,8 +254,8 @@ def run_deq_experiment(
     clean_np, out_channels = load_target_image(image_name, size=size)
     y_target = jnp.asarray(clean_np[None, ...], dtype=jnp.float32)
 
-    # Condition: normalized 2D coordinate grid + gentle Fourier features (2 octaves)
-    cond_np = make_fourier_coords(size, octaves=2)
+    # Condition: normalized 2D coordinate grid + gentle Fourier features (4 octaves)
+    cond_np = make_fourier_coords(size, octaves=4)
     cond = jnp.asarray(cond_np)
     in_cond_dim = cond.shape[1]
 

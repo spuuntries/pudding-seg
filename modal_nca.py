@@ -191,7 +191,7 @@ def run_modal_pool(
     for name in [
         "target.png", "deq_recon.png", "deq_segmentation_pca.png", "deq_discrete_seg.png",
         "regen_half_wipe_strip.png", "regen_crater_strip.png", "regen_pepper_strip.png",
-        "regen_half_wipe_large.png", "regen_crater_strip_large.png", "regen_pepper_strip_large.png",
+        "regen_half_wipe_strip_large.png", "regen_crater_strip_large.png", "regen_pepper_strip_large.png",
     ]:
         file_p = out_dir / name
         if file_p.is_file():
