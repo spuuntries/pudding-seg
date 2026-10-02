@@ -127,13 +127,28 @@ def run_pool_experiment(
         batch_z_dam = apply_pool_damage(k_dam, batch_z, num_damaged=2)
 
         # Solve DEQ stationary state using PC-ALM Augmented Lagrangian
-        grads, total_loss, z_eq = compute_deq_grads(
+        deq_grads, total_loss, z_eq = compute_deq_grads(
             p, batch_z_dam, cond, y_batch,
             steps=deq_steps, inner_steps=inner_steps,
             state_lr=state_lr, rho=rho, alpha=alpha, tv_weight=tv_weight,
         )
 
-        p, opt_s = adam_apply(p, grads, opt_s, lr=lr)
+        # Attractor flow loss: train NCA MLP so that forward updates on damaged states move directly towards settled z_eq
+        def flow_loss_fn(p_curr):
+            z_target_stop = jax.lax.stop_gradient(z_eq[:2])
+            def flow_step(zc, _):
+                delta = nca_cond_delta(zc, cond, p_curr)
+                return zc + 0.5 * delta, None
+            z_flow, _ = jax.lax.scan(flow_step, batch_z_dam[:2], xs=None, length=8)
+            l_flow = jnp.mean((z_flow - z_target_stop) ** 2)
+            pred_flow = readout(z_flow, p_curr)
+            l_recon = jnp.mean((pred_flow - y_batch[:2]) ** 2)
+            return l_flow + 0.5 * l_recon
+
+        flow_val, flow_grads = jax.value_and_grad(flow_loss_fn)(p)
+        combined_grads = jax.tree_util.tree_map(lambda g1, g2: g1 + 0.5 * g2, deq_grads, flow_grads)
+
+        p, opt_s = adam_apply(p, combined_grads, opt_s, lr=lr)
 
         # Update persistent pool with settled equilibrium states
         new_pool = pool_state.at[idx].set(jax.lax.stop_gradient(z_eq))
@@ -211,33 +226,20 @@ def run_decimation_battery(
     inner_steps: int = 3,
     alpha: float = 0.1,
 ):
-    """Executes decimation tests using DEQ PC-ALM inpainting."""
-    print("=== Running Distill Decimation + DEQ PC-ALM Inpainting Battery ===")
+    """Executes decimation tests using forward NCA relaxation while pinning intact pixels."""
+    print("=== Running Distill Decimation + Forward NCA Self-Healing Battery ===")
 
-    def inpaint_relax(z_start, keep_mask, n_outer=15):
-        def energy(zc, dualc):
-            pred_y = readout(zc, params)
-            loss_sup = 0.5 * jnp.sum((keep_mask * (pred_y - y_target)) ** 2) / zc.shape[0]
-            delta = nca_cond_delta(zc, cond, params)
-            shifted = delta + dualc / rho
-            loss_eq = 0.5 * rho * jnp.sum(shifted * shifted) / zc.shape[0]
-            diff_x = zc[:, :, :, 1:] - zc[:, :, :, :-1]
-            diff_y = zc[:, :, 1:, :] - zc[:, :, :-1, :]
-            loss_tv = tv_weight * (jnp.sum(jnp.sqrt(diff_x ** 2 + 1e-6)) + jnp.sum(jnp.sqrt(diff_y ** 2 + 1e-6))) / zc.shape[0]
-            return loss_sup + loss_eq + loss_tv
-
-        g_fn = jax.grad(energy)
+    def inpaint_relax(z_start, keep_mask, n_steps=60, step_size=0.5):
+        snapshots = [z_start]
+        checkpoint_steps = [5, 15, 30, n_steps]
         zc = z_start
-        dualc = jnp.zeros_like(zc)
-        snapshots = [zc]
-        checkpoint_steps = [2, 5, 10, n_outer]
 
-        for o in range(1, n_outer + 1):
-            for _ in range(inner_steps):
-                zc = zc - state_lr * g_fn(zc, dualc)
-            r = nca_cond_delta(zc, cond, params)
-            dualc = dualc + alpha * r
-            if o in checkpoint_steps:
+        for s in range(1, n_steps + 1):
+            delta = nca_cond_delta(zc, cond, params)
+            zc = zc + step_size * delta
+            # Pin intact pixels to true settled equilibrium state
+            zc = jnp.where(keep_mask > 0.5, z_eq, zc)
+            if s in checkpoint_steps:
                 snapshots.append(zc)
 
         return snapshots
@@ -255,7 +257,7 @@ def run_decimation_battery(
     mask_half = mask_half.at[:, :, :, size // 2:].set(0.0)
     z_half = z_eq * mask_half
 
-    snaps_half = inpaint_relax(z_half, mask_half, n_outer=deq_steps)
+    snaps_half = inpaint_relax(z_half, mask_half, n_steps=60)
     imgs_half = [to_img(s) for s in snaps_half]
     if out_channels == 1:
         imgs_half = [np.stack([im, im, im], axis=-1) for im in imgs_half]
@@ -269,7 +271,7 @@ def run_decimation_battery(
     mask_circle = ((yy - cy) ** 2 + (xx - cx) ** 2 >= r ** 2).astype(np.float32)[None, None, ...]
     z_circle = z_eq * jnp.asarray(mask_circle)
 
-    snaps_circle = inpaint_relax(z_circle, jnp.asarray(mask_circle), n_outer=deq_steps)
+    snaps_circle = inpaint_relax(z_circle, jnp.asarray(mask_circle), n_steps=60)
     imgs_circle = [to_img(s) for s in snaps_circle]
     if out_channels == 1:
         imgs_circle = [np.stack([im, im, im], axis=-1) for im in imgs_circle]
@@ -281,11 +283,21 @@ def run_decimation_battery(
     mask_pepper = (np.random.rand(1, 1, size, size) > 0.5).astype(np.float32)
     z_pepper = z_eq * jnp.asarray(mask_pepper)
 
-    snaps_pepper = inpaint_relax(z_pepper, jnp.asarray(mask_pepper), n_outer=deq_steps)
+    snaps_pepper = inpaint_relax(z_pepper, jnp.asarray(mask_pepper), n_steps=60)
     imgs_pepper = [to_img(s) for s in snaps_pepper]
     if out_channels == 1:
         imgs_pepper = [np.stack([im, im, im], axis=-1) for im in imgs_pepper]
     strip_pepper = np.concatenate(imgs_pepper, axis=1)
     Image.fromarray(strip_pepper).save(save_dir / "regen_pepper_strip.png")
 
-    print(f"Saved decimation regeneration strips (half-wipe, crater, pepper) to {save_dir}")
+    # Save 6x upscaled strips for clear visual inspection
+    for strip_name, strip_arr in [
+        ("regen_half_wipe", strip_half),
+        ("regen_crater", strip_circle),
+        ("regen_pepper", strip_pepper),
+    ]:
+        im = Image.fromarray(strip_arr)
+        im_large = im.resize((im.width * 6, im.height * 6), Image.Resampling.NEAREST)
+        im_large.save(save_dir / f"{strip_name}_large.png")
+
+    print(f"Saved decimation regeneration strips (and 6x large versions) to {save_dir}")
