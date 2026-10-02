@@ -147,7 +147,7 @@ def run_pool_experiment(
             return l_flow + 0.5 * l_recon
 
         flow_val, flow_grads = jax.value_and_grad(flow_loss_fn)(p)
-        combined_grads = jax.tree_util.tree_map(lambda g1, g2: g1 + 0.5 * g2, deq_grads, flow_grads)
+        combined_grads = jax.tree_util.tree_map(lambda g1, g2: g1 + 1.0 * g2, deq_grads, flow_grads)
 
         p, opt_s = adam_apply(p, combined_grads, opt_s, lr=lr)
 
@@ -230,9 +230,9 @@ def run_decimation_battery(
     """Executes decimation tests using forward NCA relaxation while pinning intact pixels."""
     print("=== Running Distill Decimation + Forward NCA Self-Healing Battery ===")
 
-    def inpaint_relax(z_start, keep_mask, n_steps=60, step_size=0.5):
+    def inpaint_relax(z_start, keep_mask, n_steps=150, step_size=1.0):
         snapshots = [z_start]
-        checkpoint_steps = [5, 15, 30, n_steps]
+        checkpoint_steps = [10, 30, 80, n_steps]
         zc = z_start
 
         for s in range(1, n_steps + 1):
@@ -258,7 +258,7 @@ def run_decimation_battery(
     mask_half = mask_half.at[:, :, :, size // 2:].set(0.0)
     z_half = z_eq * mask_half
 
-    snaps_half = inpaint_relax(z_half, mask_half, n_steps=60)
+    snaps_half = inpaint_relax(z_half, mask_half, n_steps=150)
     imgs_half = [to_img(s) for s in snaps_half]
     if out_channels == 1:
         imgs_half = [np.stack([im, im, im], axis=-1) for im in imgs_half]
@@ -272,7 +272,7 @@ def run_decimation_battery(
     mask_circle = ((yy - cy) ** 2 + (xx - cx) ** 2 >= r ** 2).astype(np.float32)[None, None, ...]
     z_circle = z_eq * jnp.asarray(mask_circle)
 
-    snaps_circle = inpaint_relax(z_circle, jnp.asarray(mask_circle), n_steps=60)
+    snaps_circle = inpaint_relax(z_circle, jnp.asarray(mask_circle), n_steps=150)
     imgs_circle = [to_img(s) for s in snaps_circle]
     if out_channels == 1:
         imgs_circle = [np.stack([im, im, im], axis=-1) for im in imgs_circle]
@@ -284,7 +284,7 @@ def run_decimation_battery(
     mask_pepper = (np.random.rand(1, 1, size, size) > 0.5).astype(np.float32)
     z_pepper = z_eq * jnp.asarray(mask_pepper)
 
-    snaps_pepper = inpaint_relax(z_pepper, jnp.asarray(mask_pepper), n_steps=60)
+    snaps_pepper = inpaint_relax(z_pepper, jnp.asarray(mask_pepper), n_steps=150)
     imgs_pepper = [to_img(s) for s in snaps_pepper]
     if out_channels == 1:
         imgs_pepper = [np.stack([im, im, im], axis=-1) for im in imgs_pepper]
@@ -293,9 +293,9 @@ def run_decimation_battery(
 
     # Save 6x upscaled strips for clear visual inspection
     for strip_name, strip_arr in [
-        ("regen_half_wipe", strip_half),
-        ("regen_crater", strip_circle),
-        ("regen_pepper", strip_pepper),
+        ("regen_half_wipe_strip", strip_half),
+        ("regen_crater_strip", strip_circle),
+        ("regen_pepper_strip", strip_pepper),
     ]:
         im = Image.fromarray(strip_arr)
         im_large = im.resize((im.width * 6, im.height * 6), Image.Resampling.NEAREST)
