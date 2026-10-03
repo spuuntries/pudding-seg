@@ -275,20 +275,27 @@ def run_decimation_battery(
     lam_max = compute_spectral_radius(params, z_eq, cond)
     print(f"[THEORY] Spectral radius of relaxation operator at z_eq: |lambda_max| = {lam_max:.4f}")
 
-    def forward_nca_relax(z_start, keep_mask, n_steps=28, step_size=0.5, min_steps=18, tol=5e-6):
-        """Autonomous NCA forward relaxation with DEQ residual convergence and dynamic linspace sampling."""
+    def forward_nca_relax(z_start, keep_mask, n_steps=28, step_size=0.5, min_steps=22, tol=2e-6):
+        """Autonomous NCA forward relaxation with dynamic residual-triggered soft landing."""
         history = [z_start]
         zc = z_start
         dam_mask = 1.0 - keep_mask
         residuals = []
+        settle_count = 0
 
         for s in range(1, n_steps + 1):
             delta = nca_cond_delta(zc, cond, params)
             res = float(jnp.mean((dam_mask * delta) ** 2))
             residuals.append(res)
 
-            # Gentle landing factor after step 12 to prevent overshoot
-            effective_lr = step_size * (0.97 ** max(0, s - 12))
+            max_res = max(residuals)
+            # Dynamic settle trigger: starts decaying ONLY after wave activity has peaked and dropped below 35% of max
+            if len(residuals) >= 6 and res < 0.35 * max_res:
+                settle_count += 1
+                effective_lr = step_size * (0.96 ** settle_count)
+            else:
+                effective_lr = step_size
+
             zc = zc + effective_lr * delta
             # Pin intact pixels to true settled equilibrium state
             zc = jnp.where(keep_mask > 0.5, z_eq, zc)
@@ -305,7 +312,7 @@ def run_decimation_battery(
         best_step = (min_steps - 1) + best_offset + 1
         t_final = min(best_step, len(history) - 1)
         indices = np.linspace(0, t_final, 5, dtype=int)
-        print(f"[DEQ-RELAX] Converged at step {t_final}/{n_steps} (res: {residuals[t_final - 1]:.6f}) | linspace frames: {indices.tolist()}")
+        print(f"[DEQ-RELAX] Converged at step {t_final}/{n_steps} (res: {residuals[t_final - 1]:.6f}, settle_steps: {settle_count}) | linspace frames: {indices.tolist()}")
 
         snapshots = [history[idx] for idx in indices]
         return snapshots
@@ -323,7 +330,7 @@ def run_decimation_battery(
     mask_half = mask_half.at[:, :, :, size // 2:].set(0.0)
     z_half = z_eq * mask_half
 
-    snaps_half = forward_nca_relax(z_half, mask_half, n_steps=28, step_size=0.5, min_steps=18, tol=5e-6)
+    snaps_half = forward_nca_relax(z_half, mask_half, n_steps=28, step_size=0.5, min_steps=22, tol=2e-6)
     imgs_half = [to_img(s) for s in snaps_half]
     if out_channels == 1:
         imgs_half = [np.stack([im, im, im], axis=-1) for im in imgs_half]
@@ -337,7 +344,7 @@ def run_decimation_battery(
     mask_circle = ((yy - cy) ** 2 + (xx - cx) ** 2 >= r ** 2).astype(np.float32)[None, None, ...]
     z_circle = z_eq * jnp.asarray(mask_circle)
 
-    snaps_circle = forward_nca_relax(z_circle, jnp.asarray(mask_circle), n_steps=28, step_size=0.5, min_steps=18, tol=5e-6)
+    snaps_circle = forward_nca_relax(z_circle, jnp.asarray(mask_circle), n_steps=28, step_size=0.5, min_steps=22, tol=2e-6)
     imgs_circle = [to_img(s) for s in snaps_circle]
     if out_channels == 1:
         imgs_circle = [np.stack([im, im, im], axis=-1) for im in imgs_circle]
@@ -349,7 +356,7 @@ def run_decimation_battery(
     mask_pepper = (np.random.rand(1, 1, size, size) > 0.5).astype(np.float32)
     z_pepper = z_eq * jnp.asarray(mask_pepper)
 
-    snaps_pepper = forward_nca_relax(z_pepper, jnp.asarray(mask_pepper), n_steps=28, step_size=0.5, min_steps=18, tol=5e-6)
+    snaps_pepper = forward_nca_relax(z_pepper, jnp.asarray(mask_pepper), n_steps=28, step_size=0.5, min_steps=10, tol=2e-6)
     imgs_pepper = [to_img(s) for s in snaps_pepper]
     if out_channels == 1:
         imgs_pepper = [np.stack([im, im, im], axis=-1) for im in imgs_pepper]
