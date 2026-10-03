@@ -117,7 +117,7 @@ def run_pool_experiment(
 
     @jax.jit
     def pool_train_step(p, opt_s, pool_state, k):
-        k_idx, k_dam, k_seed, k_n = jax.random.split(k, 4)
+        k_idx, k_dam, k_seed, k_n, k_pert = jax.random.split(k, 5)
         idx = jax.random.choice(k_idx, pool_size, (batch_size,), replace=False)
         batch_z = pool_state[idx]
 
@@ -128,8 +128,8 @@ def run_pool_experiment(
         fresh_seed = jax.random.normal(k_seed, (channels, size, size)) * 0.05
         batch_z = batch_z.at[worst_in_batch].set(fresh_seed)
 
-        # Apply Distill decimation damage to first 2 samples
-        batch_z_dam, batch_masks = apply_pool_damage(k_dam, batch_z, num_damaged=2)
+        # Apply Distill decimation damage to first 4 samples
+        batch_z_dam, batch_masks = apply_pool_damage(k_dam, batch_z, num_damaged=4)
 
         # Solve DEQ stationary state using PC-ALM Augmented Lagrangian
         deq_grads, total_loss, z_eq = compute_deq_grads(
@@ -138,11 +138,13 @@ def run_pool_experiment(
             state_lr=state_lr, rho=rho, alpha=alpha, tv_weight=tv_weight,
         )
 
-        # Matched inpainting flow loss with PINNED intact pixels: N ~ Uniform(16, 28)
+        # Matched inpainting flow loss with PINNED intact pixels: N ~ Uniform(24, 48)
         def flow_loss_fn(p_curr):
-            n_steps = jax.random.randint(k_n, (), 16, 29)
-            z_target_stop = jax.lax.stop_gradient(z_eq[:2])
-            masks_target = batch_masks[:2]
+            n_steps = jax.random.randint(k_n, (), 24, 49)
+            z_target_stop = jax.lax.stop_gradient(z_eq[:4])
+            masks_target = batch_masks[:4]
+            dam_mask = 1.0 - masks_target
+            dam_pixels = jnp.sum(dam_mask) + 1e-6
 
             def flow_step(zc, _):
                 delta = nca_cond_delta(zc, cond, p_curr)
@@ -151,32 +153,59 @@ def run_pool_experiment(
                 z_next = jnp.where(masks_target > 0.5, z_target_stop, z_next)
                 return z_next, z_next
 
-            _, z_traj = jax.lax.scan(flow_step, batch_z_dam[:2], xs=None, length=28)
+            _, z_traj = jax.lax.scan(flow_step, batch_z_dam[:4], xs=None, length=48)
             z_final = z_traj[n_steps - 1]
-            l_flow = jnp.mean((z_final - z_target_stop) ** 2)
-            pred_flow = readout(z_final, p_curr)
 
-            # High-frequency sharpening: L2 + L1 + Sobel edge gradients
-            l_recon_l2 = jnp.mean((pred_flow - y_batch[:2]) ** 2)
-            l_recon_l1 = jnp.mean(jnp.sqrt((pred_flow - y_batch[:2]) ** 2 + 1e-6))
+            # Undiluted flow loss focused purely on the void
+            l_flow = jnp.sum(dam_mask * (z_final - z_target_stop) ** 2) / (dam_pixels * channels)
+            pred_flow = readout(z_final, p_curr)
+            y_sub = y_batch[:4]
+
+            # High-frequency sharpening on void: L2 + L1 + Sobel edge gradients
+            l_recon_l2 = jnp.sum(dam_mask * (pred_flow - y_sub) ** 2) / dam_pixels
+            l_recon_l1 = jnp.sum(dam_mask * jnp.sqrt((pred_flow - y_sub) ** 2 + 1e-6)) / dam_pixels
             gx_pred = pred_flow[:, :, :, 1:] - pred_flow[:, :, :, :-1]
             gy_pred = pred_flow[:, :, 1:, :] - pred_flow[:, :, :-1, :]
-            gx_y = y_batch[:2, :, :, 1:] - y_batch[:2, :, :, :-1]
-            gy_y = y_batch[:2, :, 1:, :] - y_batch[:2, :, :-1, :]
-            l_edge = jnp.mean(jnp.sqrt((gx_pred - gx_y) ** 2 + 1e-6)) + jnp.mean(jnp.sqrt((gy_pred - gy_y) ** 2 + 1e-6))
-            l_recon = l_recon_l2 + l_recon_l1 + 0.5 * l_edge
+            gx_y = y_sub[:, :, :, 1:] - y_sub[:, :, :, :-1]
+            gy_y = y_sub[:, :, 1:, :] - y_sub[:, :, :-1, :]
+            mask_gx = dam_mask[:, :, :, 1:] * dam_mask[:, :, :, :-1]
+            mask_gy = dam_mask[:, :, 1:, :] * dam_mask[:, :, :-1, :]
+            l_edge = (
+                jnp.sum(mask_gx * jnp.sqrt((gx_pred - gx_y) ** 2 + 1e-6)) / (jnp.sum(mask_gx) + 1e-6)
+                + jnp.sum(mask_gy * jnp.sqrt((gy_pred - gy_y) ** 2 + 1e-6)) / (jnp.sum(mask_gy) + 1e-6)
+            )
+            l_recon = l_recon_l2 + 1.0 * l_recon_l1 + 0.5 * l_edge
 
+            # Strict zero-velocity attractor constraints:
+            # 1. Delta on the evolving state must drop to 0
             delta_final = nca_cond_delta(z_final, cond, p_curr)
-            l_stationary = jnp.mean(delta_final ** 2)
-            return l_flow + 1.0 * l_recon + 0.5 * l_stationary
+            l_stationary = jnp.sum(dam_mask * (delta_final ** 2)) / (dam_pixels * channels)
+            # 2. Delta on the TARGET equilibrium state MUST be identically ZERO (no drift at z*!)
+            delta_target = nca_cond_delta(z_target_stop, cond, p_curr)
+            l_target_drift = jnp.mean(delta_target ** 2)
 
-        flow_val, flow_grads = jax.value_and_grad(flow_loss_fn)(p)
+            # 3. Contractive Restoring Spring Basin around z_target:
+            # Shake z_target_stop with random bidirectional perturbations (+ and -).
+            # The NCA step MUST push it directly back towards z_target_stop!
+            noise = jax.random.normal(k_pert, z_target_stop.shape) * 0.20
+            z_perturbed = z_target_stop + noise
+            delta_pert = nca_cond_delta(z_perturbed, cond, p_curr)
+            z_restored = z_perturbed + 0.5 * delta_pert
+            l_spring = jnp.mean((z_restored - z_target_stop) ** 2)
+
+            loss = l_flow + 1.0 * l_recon + 0.5 * l_stationary + 1.0 * l_target_drift + 2.0 * l_spring
+            return loss, z_final
+
+        (flow_val, z_final_stepped), flow_grads = jax.value_and_grad(flow_loss_fn, has_aux=True)(p)
         combined_grads = jax.tree_util.tree_map(lambda g1, g2: g1 + 1.0 * g2, deq_grads, flow_grads)
 
         p, opt_s = adam_apply(p, combined_grads, opt_s, lr=lr)
 
-        # Update persistent pool with settled equilibrium states
-        new_pool = pool_state.at[idx].set(jax.lax.stop_gradient(z_eq))
+        # Distill persistent pool: put the stepped states back into the pool for damaged slots!
+        # This forces the pool to maintain long-term attractor stability across life cycles.
+        batch_z_updated = batch_z.at[:4].set(jax.lax.stop_gradient(z_final_stepped))
+        batch_z_updated = batch_z_updated.at[4:].set(jax.lax.stop_gradient(z_eq[4:]))
+        new_pool = pool_state.at[idx].set(batch_z_updated)
         return p, opt_s, new_pool, total_loss
 
     print(f"=== Starting Distill Pool + DEQ PC-ALM on '{image_name}' (pool={pool_size}, batch={batch_size}, steps={steps}, size={size}x{size}) ===")
@@ -275,11 +304,21 @@ def run_decimation_battery(
     lam_max = compute_spectral_radius(params, z_eq, cond)
     print(f"[THEORY] Spectral radius of relaxation operator at z_eq: |lambda_max| = {lam_max:.4f}")
 
-    def forward_nca_relax(z_start, keep_mask, n_steps=28, step_size=0.5, min_steps=22, tol=2e-6):
-        """Autonomous NCA forward relaxation with dynamic residual-triggered soft landing."""
+    def forward_nca_relax(z_start, keep_mask, n_steps=48, step_size=0.5):
+        """Autonomous NCA forward relaxation with dynamic boundary-seam continuity valley detection."""
         history = [z_start]
         zc = z_start
         dam_mask = 1.0 - keep_mask
+
+        # 1-pixel boundary rim just inside the damaged void:
+        up = jnp.roll(keep_mask, 1, axis=2)
+        down = jnp.roll(keep_mask, -1, axis=2)
+        left = jnp.roll(keep_mask, 1, axis=3)
+        right = jnp.roll(keep_mask, -1, axis=3)
+        seam_mask = ((up + down + left + right) > 0.5) & (keep_mask < 0.5)
+        seam_weight = float(jnp.sum(seam_mask)) + 1e-6
+
+        seam_errors = []
         residuals = []
         settle_count = 0
 
@@ -289,30 +328,29 @@ def run_decimation_battery(
             residuals.append(res)
 
             max_res = max(residuals)
-            # Dynamic settle trigger: starts decaying ONLY after wave activity has peaked and dropped below 35% of max
             if len(residuals) >= 6 and res < 0.35 * max_res:
                 settle_count += 1
-                effective_lr = step_size * (0.96 ** settle_count)
+                effective_lr = step_size * (0.97 ** settle_count)
             else:
                 effective_lr = step_size
 
             zc = zc + effective_lr * delta
-            # Pin intact pixels to true settled equilibrium state
             zc = jnp.where(keep_mask > 0.5, z_eq, zc)
             history.append(zc)
 
-            if s >= min_steps and res < tol:
-                break
-            if s >= min_steps + 4 and res > 1.5 * min(residuals[min_steps - 1:]):
+            # Measure boundary seam discontinuity between inside and outside
+            seam_err = float(jnp.sum(jnp.abs(zc - z_eq) * seam_mask) / seam_weight)
+            seam_errors.append(seam_err)
+
+            # Valley detection: once the seam error drops to a minimum and starts climbing for 3 consecutive steps, stop!
+            if s >= 6 and seam_err > 1.05 * min(seam_errors) and seam_errors[-1] > seam_errors[-2] > seam_errors[-3]:
                 break
 
-        # Best converged step within the valid trained horizon
-        valid_residuals = residuals[min_steps - 1:]
-        best_offset = int(np.argmin(valid_residuals))
-        best_step = (min_steps - 1) + best_offset + 1
+        # Best converged step is the exact valley where the boundary seam is smoothest
+        best_step = int(np.argmin(seam_errors)) + 1
         t_final = min(best_step, len(history) - 1)
         indices = np.linspace(0, t_final, 5, dtype=int)
-        print(f"[DEQ-RELAX] Converged at step {t_final}/{n_steps} (res: {residuals[t_final - 1]:.6f}, settle_steps: {settle_count}) | linspace frames: {indices.tolist()}")
+        print(f"[DEQ-RELAX] Converged at step {t_final}/{s} (seam_err: {seam_errors[t_final - 1]:.5f}, res: {residuals[t_final - 1]:.6f}) | linspace frames: {indices.tolist()}")
 
         snapshots = [history[idx] for idx in indices]
         return snapshots
@@ -330,7 +368,7 @@ def run_decimation_battery(
     mask_half = mask_half.at[:, :, :, size // 2:].set(0.0)
     z_half = z_eq * mask_half
 
-    snaps_half = forward_nca_relax(z_half, mask_half, n_steps=28, step_size=0.5, min_steps=22, tol=2e-6)
+    snaps_half = forward_nca_relax(z_half, mask_half, n_steps=48, step_size=0.5)
     imgs_half = [to_img(s) for s in snaps_half]
     if out_channels == 1:
         imgs_half = [np.stack([im, im, im], axis=-1) for im in imgs_half]
@@ -344,7 +382,7 @@ def run_decimation_battery(
     mask_circle = ((yy - cy) ** 2 + (xx - cx) ** 2 >= r ** 2).astype(np.float32)[None, None, ...]
     z_circle = z_eq * jnp.asarray(mask_circle)
 
-    snaps_circle = forward_nca_relax(z_circle, jnp.asarray(mask_circle), n_steps=28, step_size=0.5, min_steps=22, tol=2e-6)
+    snaps_circle = forward_nca_relax(z_circle, jnp.asarray(mask_circle), n_steps=48, step_size=0.5)
     imgs_circle = [to_img(s) for s in snaps_circle]
     if out_channels == 1:
         imgs_circle = [np.stack([im, im, im], axis=-1) for im in imgs_circle]
@@ -356,7 +394,7 @@ def run_decimation_battery(
     mask_pepper = (np.random.rand(1, 1, size, size) > 0.5).astype(np.float32)
     z_pepper = z_eq * jnp.asarray(mask_pepper)
 
-    snaps_pepper = forward_nca_relax(z_pepper, jnp.asarray(mask_pepper), n_steps=28, step_size=0.5, min_steps=10, tol=2e-6)
+    snaps_pepper = forward_nca_relax(z_pepper, jnp.asarray(mask_pepper), n_steps=48, step_size=0.5)
     imgs_pepper = [to_img(s) for s in snaps_pepper]
     if out_channels == 1:
         imgs_pepper = [np.stack([im, im, im], axis=-1) for im in imgs_pepper]
