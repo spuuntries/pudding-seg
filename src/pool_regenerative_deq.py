@@ -174,7 +174,22 @@ def run_pool_experiment(
                 jnp.sum(mask_gx * jnp.sqrt((gx_pred - gx_y) ** 2 + 1e-6)) / (jnp.sum(mask_gx) + 1e-6)
                 + jnp.sum(mask_gy * jnp.sqrt((gy_pred - gy_y) ** 2 + 1e-6)) / (jnp.sum(mask_gy) + 1e-6)
             )
-            l_recon = l_recon_l2 + 1.0 * l_recon_l1 + 0.5 * l_edge
+            # Void Contrast / Dynamic Range & Mean Matching Loss:
+            # Prevents regression to the conditional mean (washed-out gray haze)
+            dam_px_sample = jnp.sum(dam_mask, axis=(2, 3), keepdims=True) + 1e-6
+            mu_pred = jnp.sum(dam_mask * pred_flow, axis=(2, 3), keepdims=True) / dam_px_sample
+            var_pred = jnp.sum(dam_mask * (pred_flow - mu_pred) ** 2, axis=(2, 3), keepdims=True) / dam_px_sample
+            std_pred = jnp.sqrt(var_pred + 1e-6)
+
+            mu_y = jnp.sum(dam_mask * y_sub, axis=(2, 3), keepdims=True) / dam_px_sample
+            var_y = jnp.sum(dam_mask * (y_sub - mu_y) ** 2, axis=(2, 3), keepdims=True) / dam_px_sample
+            std_y = jnp.sqrt(var_y + 1e-6)
+
+            l_contrast = jnp.mean(jnp.abs(std_pred - std_y))
+            l_mean_match = jnp.mean(jnp.abs(mu_pred - mu_y))
+
+            # Rebalance l_recon: downweight pure L2, amplify L1, Sobel edges, and dynamic range contrast
+            l_recon = 0.5 * l_recon_l2 + 1.5 * l_recon_l1 + 1.0 * l_edge + 1.5 * l_contrast + 0.5 * l_mean_match
 
             # Strict zero-velocity attractor constraints:
             # 1. Delta on the evolving state must drop to 0
@@ -193,7 +208,7 @@ def run_pool_experiment(
             z_restored = z_perturbed + 0.5 * delta_pert
             l_spring = jnp.mean((z_restored - z_target_stop) ** 2)
 
-            loss = l_flow + 1.0 * l_recon + 0.5 * l_stationary + 1.0 * l_target_drift + 2.0 * l_spring
+            loss = l_flow + 1.2 * l_recon + 0.5 * l_stationary + 1.0 * l_target_drift + 3.0 * l_spring
             return loss, z_final
 
         (flow_val, z_final_stepped), flow_grads = jax.value_and_grad(flow_loss_fn, has_aux=True)(p)
@@ -306,15 +321,24 @@ def run_decimation_battery(
 
     def forward_nca_relax(z_start, keep_mask, n_steps=48, step_size=0.5):
         """Autonomous NCA forward relaxation with dynamic boundary-seam continuity valley detection."""
+        from scipy.ndimage import distance_transform_edt
+
         history = [z_start]
         zc = z_start
         dam_mask = 1.0 - keep_mask
 
-        # 1-pixel boundary rim just inside the damaged void:
-        up = jnp.roll(keep_mask, 1, axis=2)
-        down = jnp.roll(keep_mask, -1, axis=2)
-        left = jnp.roll(keep_mask, 1, axis=3)
-        right = jnp.roll(keep_mask, -1, axis=3)
+        # Mathematically derived min_steps from mask depth geometry:
+        dam_np = np.asarray(dam_mask[0, 0])
+        max_depth = float(distance_transform_edt(dam_np).max()) if float(dam_np.max()) > 0 else 1.0
+        # Receptive field expands ~1.2-1.5 pixels per step:
+        min_steps = max(6, int(max_depth / 1.2))
+
+        # Boundary rim inside the damaged void (non-periodic padding so image borders don't wrap):
+        m_padded = jnp.pad(keep_mask, ((0, 0), (0, 0), (1, 1), (1, 1)), mode="constant", constant_values=0.0)
+        up = m_padded[:, :, :size, 1 : size + 1]
+        down = m_padded[:, :, 2:, 1 : size + 1]
+        left = m_padded[:, :, 1 : size + 1, :size]
+        right = m_padded[:, :, 1 : size + 1, 2:]
         seam_mask = ((up + down + left + right) > 0.5) & (keep_mask < 0.5)
         seam_weight = float(jnp.sum(seam_mask)) + 1e-6
 
@@ -342,15 +366,20 @@ def run_decimation_battery(
             seam_err = float(jnp.sum(jnp.abs(zc - z_eq) * seam_mask) / seam_weight)
             seam_errors.append(seam_err)
 
-            # Valley detection: once the seam error drops to a minimum and starts climbing for 3 consecutive steps, stop!
-            if s >= 6 and seam_err > 1.05 * min(seam_errors) and seam_errors[-1] > seam_errors[-2] > seam_errors[-3]:
-                break
+            # Valley detection: after signal reached deepest void (s >= min_steps + 3),
+            # stop if seam error is rising for 3 consecutive steps and is above 1.05 * min of valid errors:
+            if s >= min_steps + 3:
+                valid_errors = seam_errors[min_steps - 1 :]
+                if seam_err > 1.05 * min(valid_errors) and seam_errors[-1] > seam_errors[-2] > seam_errors[-3]:
+                    break
 
         # Best converged step is the exact valley where the boundary seam is smoothest
-        best_step = int(np.argmin(seam_errors)) + 1
+        valid_errors = seam_errors[min_steps - 1 :]
+        best_sub_step = int(np.argmin(valid_errors))
+        best_step = (min_steps - 1) + best_sub_step + 1
         t_final = min(best_step, len(history) - 1)
         indices = np.linspace(0, t_final, 5, dtype=int)
-        print(f"[DEQ-RELAX] Converged at step {t_final}/{s} (seam_err: {seam_errors[t_final - 1]:.5f}, res: {residuals[t_final - 1]:.6f}) | linspace frames: {indices.tolist()}")
+        print(f"[DEQ-RELAX] max_depth: {max_depth:.1f}, min_steps: {min_steps} | Converged at step {t_final}/{s} (seam_err: {seam_errors[t_final - 1]:.5f}, res: {residuals[t_final - 1]:.6f}) | linspace frames: {indices.tolist()}")
 
         snapshots = [history[idx] for idx in indices]
         return snapshots

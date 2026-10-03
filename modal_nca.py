@@ -148,7 +148,7 @@ def run_modal_deq(
 @app.function(
     image=image,
     gpu="A10G",
-    timeout=600,
+    timeout=1200,
     volumes={"/root/results": volume},
 )
 def run_modal_pool(
