@@ -307,10 +307,11 @@ def run_pyramid_experiment(
     y_batch1 = downsample_2x(y_batch0)
     y_pyr = (y_batch0, y_batch1)
 
-    # Condition: 4 octaves of Fourier coordinates on fine and coarse scales
-    cond_np = make_fourier_coords(size, octaves=octaves)
-    cond0 = jnp.asarray(cond_np)
-    cond1 = downsample_2x(cond0)
+    # Condition: Fourier coordinates generated cleanly on both fine and coarse scales
+    cond_np0 = make_fourier_coords(size, octaves=octaves)
+    cond_np1 = make_fourier_coords(size // 2, octaves=octaves)
+    cond0 = jnp.asarray(cond_np0)
+    cond1 = jnp.asarray(cond_np1)
     cond_pyr = (cond0, cond1)
     in_cond_dim = cond0.shape[1]
 
@@ -380,15 +381,14 @@ def run_pyramid_experiment(
             z0_final = z0_traj[n_steps - 1]
             z1_final = z1_traj[n_steps - 1]
 
-            # Void flow loss across both scales
-            l_flow0 = jnp.sum(dam_mask0 * (z0_final - z0_target_stop) ** 2) / (dam_pixels0 * channels)
-            l_flow1 = jnp.sum(dam_mask1 * (z1_final - z1_target_stop) ** 2) / (jnp.sum(dam_mask1) * channels + 1e-6)
+            # Void flow loss across both scales using Charbonnier Smooth L1 (no blurry L2 averaging!)
+            l_flow0 = jnp.sum(dam_mask0 * jnp.sqrt((z0_final - z0_target_stop) ** 2 + 1e-6)) / (dam_pixels0 * channels)
+            l_flow1 = jnp.sum(dam_mask1 * jnp.sqrt((z1_final - z1_target_stop) ** 2 + 1e-6)) / (jnp.sum(dam_mask1) * channels + 1e-6)
             l_flow = l_flow0 + 0.5 * l_flow1
 
             # High-frequency sharpening and contrast matching on fine void
             pred_flow = readout(z0_final, p_curr)
             y_sub = y_batch0[:4]
-            l_recon_l2 = jnp.sum(dam_mask0 * (pred_flow - y_sub) ** 2) / dam_pixels0
             l_recon_l1 = jnp.sum(dam_mask0 * jnp.sqrt((pred_flow - y_sub) ** 2 + 1e-6)) / dam_pixels0
 
             gx_pred = pred_flow[:, :, :, 1:] - pred_flow[:, :, :, :-1]
@@ -402,6 +402,13 @@ def run_pyramid_experiment(
                 + jnp.sum(mask_gy * jnp.sqrt((gy_pred - gy_y) ** 2 + 1e-6)) / (jnp.sum(mask_gy) + 1e-6)
             )
 
+            # 2nd-order Laplacian curvature (gentle sharpness guidance without contrast blowout)
+            p_pad = jnp.pad(pred_flow, ((0, 0), (0, 0), (1, 1), (1, 1)), mode="edge")
+            y_pad = jnp.pad(y_sub, ((0, 0), (0, 0), (1, 1), (1, 1)), mode="edge")
+            lap_pred = p_pad[:, :, :-2, 1:-1] + p_pad[:, :, 2:, 1:-1] + p_pad[:, :, 1:-1, :-2] + p_pad[:, :, 1:-1, 2:] - 4.0 * pred_flow
+            lap_y = y_pad[:, :, :-2, 1:-1] + y_pad[:, :, 2:, 1:-1] + y_pad[:, :, 1:-1, :-2] + y_pad[:, :, 1:-1, 2:] - 4.0 * y_sub
+            l_lap = jnp.sum(dam_mask0 * jnp.sqrt((lap_pred - lap_y) ** 2 + 1e-6)) / dam_pixels0
+
             dam_px_sample = jnp.sum(dam_mask0, axis=(2, 3), keepdims=True) + 1e-6
             mu_pred = jnp.sum(dam_mask0 * pred_flow, axis=(2, 3), keepdims=True) / dam_px_sample
             var_pred = jnp.sum(dam_mask0 * (pred_flow - mu_pred) ** 2, axis=(2, 3), keepdims=True) / dam_px_sample
@@ -412,7 +419,7 @@ def run_pyramid_experiment(
             l_contrast = jnp.mean(jnp.abs(std_pred - std_y))
             l_mean_match = jnp.mean(jnp.abs(mu_pred - mu_y))
 
-            l_recon = 0.5 * l_recon_l2 + 1.5 * l_recon_l1 + 2.5 * l_edge + 1.5 * l_contrast + 0.5 * l_mean_match
+            l_recon = 2.0 * l_recon_l1 + 2.0 * l_edge + 0.3 * l_lap + 0.3 * l_contrast + 0.5 * l_mean_match
 
             # Stationary constraints: Delta at target must be 0
             d0_target, d1_target = pyramid_delta((z0_target_stop, z1_target_stop), cond_pyr, p_curr)
@@ -545,12 +552,7 @@ def run_pyramid_decimation_battery(
             res = float(jnp.mean((dam_mask0 * d0) ** 2))
             residuals.append(res)
 
-            max_res = max(residuals)
-            if len(residuals) >= 6 and res < 0.35 * max_res:
-                settle_count += 1
-                effective_lr = step_size * (0.97 ** settle_count)
-            else:
-                effective_lr = step_size
+            effective_lr = step_size
 
             zc0 = zc0 + effective_lr * d0
             zc1 = zc1 + effective_lr * d1
@@ -561,21 +563,12 @@ def run_pyramid_decimation_battery(
             seam_err = float(jnp.sum(jnp.abs(zc0 - z_eq[0]) * seam_mask) / seam_weight)
             seam_errors.append(seam_err)
 
-            # Stop only if truly stationary (res < 1e-6) late in trajectory (s >= 32),
-            # or if seam error experiences a massive 30%+ climb (seam_err > 1.30 * min):
-            if s >= 32 and res < 1e-6:
+            if s >= 24 and res < 1e-6:
                 break
-            if s >= min_steps + 15:
-                valid_errors = seam_errors[min_steps - 1:]
-                if seam_err > 1.30 * min(valid_errors) and seam_errors[-1] > seam_errors[-2] > seam_errors[-3]:
-                    break
 
-        valid_errors = seam_errors[min_steps - 1:]
-        best_sub_step = int(np.argmin(valid_errors))
-        best_step = (min_steps - 1) + best_sub_step + 1
-        t_final = min(best_step, len(history0) - 1)
+        t_final = len(history0) - 1
         indices = np.linspace(0, t_final, 5, dtype=int)
-        print(f"[PYRAMID-RELAX] max_depth: {max_depth:.1f}, min_steps: {min_steps} | Converged at step {t_final}/{s} (seam_err: {seam_errors[t_final - 1]:.5f}, res: {residuals[t_final - 1]:.6f}) | linspace frames: {indices.tolist()}")
+        print(f"[PYRAMID-RELAX] max_depth: {max_depth:.1f}, min_steps: {min_steps} | Converged at step {t_final} (seam_err: {seam_errors[-1]:.5f}, res: {residuals[-1]:.6f}) | linspace frames: {indices.tolist()}")
 
         snapshots = [history0[idx] for idx in indices]
         return snapshots
