@@ -21,9 +21,8 @@ def downsample_2x(x: jax.Array) -> jax.Array:
 
 
 def upsample_2x(x: jax.Array) -> jax.Array:
-    """Smooth bilinear 2x upsampling."""
-    b, c, h, w = x.shape
-    return jax.image.resize(x, (b, c, h * 2, w * 2), method="bilinear")
+    """2x upsampling with nearest-neighbor repeat (preserves crisp step edges without bilinear blur)."""
+    return jnp.repeat(jnp.repeat(x, 2, axis=2), 2, axis=3)
 
 
 def perceive_standard(z: jax.Array) -> jax.Array:
@@ -294,7 +293,7 @@ def run_pyramid_experiment(
     rho: float = 1.0,
     alpha: float = 0.1,
     tv_weight: float = 0.005,
-    octaves: int = 4,
+    octaves: int = 6,
     seed: int = 42,
     save_dir: Path | None = None,
 ) -> dict:
@@ -562,9 +561,13 @@ def run_pyramid_decimation_battery(
             seam_err = float(jnp.sum(jnp.abs(zc0 - z_eq[0]) * seam_mask) / seam_weight)
             seam_errors.append(seam_err)
 
-            if s >= min_steps + 3:
+            # Stop only if truly stationary (res < 1e-6) late in trajectory (s >= 32),
+            # or if seam error experiences a massive 30%+ climb (seam_err > 1.30 * min):
+            if s >= 32 and res < 1e-6:
+                break
+            if s >= min_steps + 15:
                 valid_errors = seam_errors[min_steps - 1:]
-                if seam_err > 1.05 * min(valid_errors) and seam_errors[-1] > seam_errors[-2] > seam_errors[-3]:
+                if seam_err > 1.30 * min(valid_errors) and seam_errors[-1] > seam_errors[-2] > seam_errors[-3]:
                     break
 
         valid_errors = seam_errors[min_steps - 1:]
