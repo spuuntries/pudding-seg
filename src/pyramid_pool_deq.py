@@ -395,8 +395,8 @@ def run_pyramid_experiment(
             gy_pred = pred_flow[:, :, 1:, :] - pred_flow[:, :, :-1, :]
             gx_y = y_sub[:, :, :, 1:] - y_sub[:, :, :, :-1]
             gy_y = y_sub[:, :, 1:] - y_sub[:, :, :-1, :]
-            mask_gx = dam_mask0[:, :, :, 1:] * dam_mask0[:, :, :, :-1]
-            mask_gy = dam_mask0[:, :, 1:, :] * dam_mask0[:, :, :-1, :]
+            mask_gx = ((dam_mask0[:, :, :, 1:] + dam_mask0[:, :, :, :-1]) > 0.5).astype(jnp.float32)
+            mask_gy = ((dam_mask0[:, :, 1:, :] + dam_mask0[:, :, :-1, :]) > 0.5).astype(jnp.float32)
             l_edge = (
                 jnp.sum(mask_gx * jnp.sqrt((gx_pred - gx_y) ** 2 + 1e-6)) / (jnp.sum(mask_gx) + 1e-6)
                 + jnp.sum(mask_gy * jnp.sqrt((gy_pred - gy_y) ** 2 + 1e-6)) / (jnp.sum(mask_gy) + 1e-6)
@@ -419,7 +419,7 @@ def run_pyramid_experiment(
             l_contrast = jnp.mean(jnp.abs(std_pred - std_y))
             l_mean_match = jnp.mean(jnp.abs(mu_pred - mu_y))
 
-            l_recon = 2.0 * l_recon_l1 + 2.5 * l_edge + 0.5 * l_lap + 0.5 * l_contrast + 1.5 * l_mean_match
+            l_recon = 2.0 * l_recon_l1 + 2.5 * l_edge + 0.5 * l_lap + 0.5 * l_contrast + 4.0 * l_mean_match
 
             # Stationary constraints: Delta at target must be 0
             d0_target, d1_target = pyramid_delta((z0_target_stop, z1_target_stop), cond_pyr, p_curr)
