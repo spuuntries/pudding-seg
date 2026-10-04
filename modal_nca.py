@@ -261,6 +261,63 @@ def run_modal_pyramid(
     return {"history": hist, "images": images}
 
 
+@app.function(
+    image=image,
+    gpu="A10G",
+    timeout=1200,
+    volumes={"/root/results": volume},
+)
+def run_modal_pure_pyramid(
+    image_name: str = "camera",
+    steps: int = 400,
+    pool_size: int = 32,
+    batch_size: int = 8,
+    size: int = 48,
+    channels: int = 16,
+    hidden_dim: int = 64,
+    lr: float = 3e-3,
+    deq_steps: int = 15,
+    state_lr: float = 0.05,
+    tv_weight: float = 0.005,
+):
+    import sys
+    sys.path.insert(0, "/root")
+    from pathlib import Path
+    from src.pure_pyramid_deq import run_pure_pyramid_experiment
+
+    out_dir = Path("/root/results") / f"pure_pyramid_{image_name}_{size}x{size}"
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    print(f"=== Running 100% Coordinate-Free 3-Level Pyramid NCA on '{image_name}' on A10G (48->24->12, steps={steps}) ===")
+    hist = run_pure_pyramid_experiment(
+        image_name=image_name,
+        pool_size=pool_size,
+        batch_size=batch_size,
+        steps=steps,
+        size=size,
+        channels=channels,
+        hidden_dim=hidden_dim,
+        lr=lr,
+        deq_steps=deq_steps,
+        state_lr=state_lr,
+        tv_weight=tv_weight,
+        save_dir=out_dir,
+    )
+    volume.commit()
+
+    images = {}
+    for name in [
+        "target.png", "deq_recon.png", "deq_segmentation_pca.png", "deq_discrete_seg.png",
+        "regen_half_wipe_strip.png", "regen_crater_strip.png", "regen_pepper_strip.png",
+        "regen_half_wipe_strip_large.png", "regen_crater_strip_large.png", "regen_pepper_strip_large.png",
+    ]:
+        file_p = out_dir / name
+        if file_p.is_file():
+            images[name] = file_p.read_bytes()
+
+    return {"history": hist, "images": images}
+
+
 @app.local_entrypoint()
 def main(
     image: str = "camera",
@@ -278,7 +335,20 @@ def main(
     batch_size: int = 8,
 ):
     from pathlib import Path
-    if mode == "pyramid":
+    if mode == "pure_pyramid":
+        res = run_modal_pure_pyramid.remote(
+            image_name=image,
+            steps=steps,
+            pool_size=pool_size,
+            batch_size=batch_size,
+            size=size,
+            channels=channels,
+            hidden_dim=hidden_dim,
+            deq_steps=deq_steps,
+            tv_weight=tv_weight,
+        )
+        local_out = Path(f"results/pure_pyramid_{image}")
+    elif mode == "pyramid":
         res = run_modal_pyramid.remote(
             image_name=image,
             steps=steps,
