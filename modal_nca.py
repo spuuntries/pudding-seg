@@ -220,7 +220,7 @@ def run_modal_pyramid(
     deq_steps: int = 15,
     state_lr: float = 0.05,
     tv_weight: float = 0.005,
-    octaves: int = 6,
+    octaves: int = 7,
 ):
     import sys
     sys.path.insert(0, "/root")
@@ -328,7 +328,7 @@ def main(
     hidden_dim: int = 96,
     deq_steps: int = 15,
     tv_weight: float = 0.005,
-    octaves: int = 6,
+    octaves: int = 7,
     clusters: int = 4,
     damage_prob: float = 0.5,
     pool_size: int = 32,

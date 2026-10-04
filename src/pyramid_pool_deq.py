@@ -293,7 +293,7 @@ def run_pyramid_experiment(
     rho: float = 1.0,
     alpha: float = 0.1,
     tv_weight: float = 0.005,
-    octaves: int = 6,
+    octaves: int = 7,
     seed: int = 42,
     save_dir: Path | None = None,
 ) -> dict:
@@ -419,7 +419,7 @@ def run_pyramid_experiment(
             l_contrast = jnp.mean(jnp.abs(std_pred - std_y))
             l_mean_match = jnp.mean(jnp.abs(mu_pred - mu_y))
 
-            l_recon = 2.0 * l_recon_l1 + 2.0 * l_edge + 0.3 * l_lap + 0.3 * l_contrast + 0.5 * l_mean_match
+            l_recon = 2.0 * l_recon_l1 + 2.5 * l_edge + 0.5 * l_lap + 0.5 * l_contrast + 1.5 * l_mean_match
 
             # Stationary constraints: Delta at target must be 0
             d0_target, d1_target = pyramid_delta((z0_target_stop, z1_target_stop), cond_pyr, p_curr)
@@ -569,7 +569,7 @@ def run_pyramid_decimation_battery(
             seam_err = float(jnp.sum(jnp.abs(zc0 - z_eq[0]) * seam_mask) / seam_weight)
             seam_errors.append(seam_err)
 
-            if s >= 24 and res < 1e-6:
+            if s >= 36 and res < 1e-7:
                 break
 
         t_final = len(history0) - 1
