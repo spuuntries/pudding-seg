@@ -435,7 +435,7 @@ def run_pyramid_experiment(
             z1_restored = z1_pert + 0.5 * d1_pert
             l_spring = jnp.mean((z0_restored - z0_target_stop) ** 2) + 0.5 * jnp.mean((z1_restored - z1_target_stop) ** 2)
 
-            loss = l_flow + 1.2 * l_recon + 1.0 * l_target_drift + 3.0 * l_spring
+            loss = 2.0 * l_flow + 1.2 * l_recon + 1.0 * l_target_drift + 3.0 * l_spring
             return loss, (z0_final, z1_final)
 
         (flow_val, z_final_stepped), flow_grads = jax.value_and_grad(flow_loss_fn, has_aux=True)(p)
@@ -541,6 +541,12 @@ def run_pyramid_decimation_battery(
         right = m_padded[:, :, 1:size + 1, 2:]
         seam_mask = ((up + down + left + right) > 0.5) & (keep_mask0 < 0.5)
         seam_weight = float(jnp.sum(seam_mask)) + 1e-6
+
+        # Phase 1: Hierarchical Coarse Warmup (wake up the coarse compass across the void)
+        for _ in range(8):
+            _, d1 = pyramid_delta((zc0, zc1), cond_pyr, params)
+            zc1 = zc1 + step_size * d1
+            zc1 = jnp.where(keep_mask1 > 0.5, z_eq[1], zc1)
 
         history0 = [zc0]
         seam_errors = []
