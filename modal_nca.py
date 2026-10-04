@@ -202,23 +202,97 @@ def run_modal_pool(
     return {"history": hist, "images": images}
 
 
+@app.function(
+    image=image,
+    gpu="A10G",
+    timeout=1200,
+    volumes={"/root/results": volume},
+)
+def run_modal_pyramid(
+    image_name: str = "camera",
+    steps: int = 350,
+    pool_size: int = 32,
+    batch_size: int = 8,
+    size: int = 48,
+    channels: int = 16,
+    hidden_dim: int = 64,
+    lr: float = 3e-3,
+    deq_steps: int = 15,
+    state_lr: float = 0.05,
+    tv_weight: float = 0.005,
+    octaves: int = 4,
+):
+    import sys
+    sys.path.insert(0, "/root")
+    from pathlib import Path
+    from src.pyramid_pool_deq import run_pyramid_experiment
+
+    out_dir = Path("/root/results") / f"pyramid_regen_{image_name}_{size}x{size}"
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    print(f"=== Running Multi-Scale Pyramid NCA DEQ on '{image_name}' on A10G (fine={size}x{size}, coarse={size//2}x{size//2}, steps={steps}) ===")
+    hist = run_pyramid_experiment(
+        image_name=image_name,
+        pool_size=pool_size,
+        batch_size=batch_size,
+        steps=steps,
+        size=size,
+        channels=channels,
+        hidden_dim=hidden_dim,
+        lr=lr,
+        deq_steps=deq_steps,
+        state_lr=state_lr,
+        tv_weight=tv_weight,
+        octaves=octaves,
+        save_dir=out_dir,
+    )
+    volume.commit()
+
+    images = {}
+    for name in [
+        "target.png", "deq_recon.png", "deq_segmentation_pca.png", "deq_discrete_seg.png",
+        "regen_half_wipe_strip.png", "regen_crater_strip.png", "regen_pepper_strip.png",
+        "regen_half_wipe_strip_large.png", "regen_crater_strip_large.png", "regen_pepper_strip_large.png",
+    ]:
+        file_p = out_dir / name
+        if file_p.is_file():
+            images[name] = file_p.read_bytes()
+
+    return {"history": hist, "images": images}
+
+
 @app.local_entrypoint()
 def main(
     image: str = "camera",
-    mode: str = "deq",
-    steps: int = 180,
+    mode: str = "pyramid",
+    steps: int = 350,
     size: int = 48,
     channels: int = 16,
+    hidden_dim: int = 64,
     deq_steps: int = 15,
     tv_weight: float = 0.005,
-    octaves: int = 6,
+    octaves: int = 4,
     clusters: int = 4,
     damage_prob: float = 0.5,
     pool_size: int = 32,
     batch_size: int = 8,
 ):
     from pathlib import Path
-    if mode == "pool":
+    if mode == "pyramid":
+        res = run_modal_pyramid.remote(
+            image_name=image,
+            steps=steps,
+            pool_size=pool_size,
+            batch_size=batch_size,
+            size=size,
+            channels=channels,
+            hidden_dim=hidden_dim,
+            deq_steps=deq_steps,
+            tv_weight=tv_weight,
+            octaves=octaves,
+        )
+        local_out = Path(f"results/pyramid_{image}")
+    elif mode == "pool":
         res = run_modal_pool.remote(
             image_name=image,
             steps=steps,
