@@ -30,10 +30,9 @@ def extract_segmentation_pca(hidden_states: np.ndarray) -> np.ndarray:
     _, _, vh = np.linalg.svd(features, full_matrices=False)
     proj = features @ vh[:3].T  # (H*W, 3)
 
-    # Normalize to [0, 255]
-    p_min = proj.min(axis=0, keepdims=True)
-    p_max = proj.max(axis=0, keepdims=True)
-    norm = (proj - p_min) / np.maximum(p_max - p_min, 1e-6)
+    # Joint proportional scaling (preserves variance ratio, prevents channel 2 & 3 noise blowout)
+    scale = np.std(proj[:, 0]) * 3.0 + 1e-6
+    norm = np.clip(proj / (2.0 * scale) + 0.5, 0.0, 1.0)
     rgb = (norm.reshape(h, w, 3) * 255.0).astype(np.uint8)
     return rgb
 
