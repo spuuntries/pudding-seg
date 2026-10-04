@@ -210,12 +210,12 @@ def run_modal_pool(
 )
 def run_modal_pyramid(
     image_name: str = "camera",
-    steps: int = 350,
+    steps: int = 400,
     pool_size: int = 32,
     batch_size: int = 8,
     size: int = 48,
     channels: int = 16,
-    hidden_dim: int = 64,
+    hidden_dim: int = 96,
     lr: float = 3e-3,
     deq_steps: int = 15,
     state_lr: float = 0.05,
@@ -265,10 +265,10 @@ def run_modal_pyramid(
 def main(
     image: str = "camera",
     mode: str = "pyramid",
-    steps: int = 350,
+    steps: int = 400,
     size: int = 48,
     channels: int = 16,
-    hidden_dim: int = 64,
+    hidden_dim: int = 96,
     deq_steps: int = 15,
     tv_weight: float = 0.005,
     octaves: int = 4,

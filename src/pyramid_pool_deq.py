@@ -286,7 +286,7 @@ def run_pyramid_experiment(
     steps: int = 350,
     size: int = 48,
     channels: int = 16,
-    hidden_dim: int = 64,
+    hidden_dim: int = 96,
     lr: float = 3e-3,
     deq_steps: int = 15,
     inner_steps: int = 3,
@@ -413,7 +413,7 @@ def run_pyramid_experiment(
             l_contrast = jnp.mean(jnp.abs(std_pred - std_y))
             l_mean_match = jnp.mean(jnp.abs(mu_pred - mu_y))
 
-            l_recon = 0.5 * l_recon_l2 + 1.5 * l_recon_l1 + 1.0 * l_edge + 1.5 * l_contrast + 0.5 * l_mean_match
+            l_recon = 0.5 * l_recon_l2 + 1.5 * l_recon_l1 + 2.5 * l_edge + 1.5 * l_contrast + 0.5 * l_mean_match
 
             # Stationary constraints: Delta at target must be 0
             d0_target, d1_target = pyramid_delta((z0_target_stop, z1_target_stop), cond_pyr, p_curr)
