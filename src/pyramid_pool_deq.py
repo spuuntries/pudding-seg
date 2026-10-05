@@ -328,7 +328,7 @@ def run_pyramid_experiment(
     pool1 = jax.random.normal(k_pool1, (pool_size, channels, size // 2, size // 2)) * 0.05
 
     @jax.jit
-    def pool_train_step(p, opt_s, p0_state, p1_state, k):
+    def pool_train_step(p, opt_s, p0_state, p1_state, k, lr_cur):
         k_idx, k_dam, k_seed, k_n, k_pert = jax.random.split(k, 5)
         idx = jax.random.choice(k_idx, pool_size, (batch_size,), replace=False)
         batch_z0 = p0_state[idx]
@@ -446,7 +446,7 @@ def run_pyramid_experiment(
         (flow_val, z_final_stepped), flow_grads = jax.value_and_grad(flow_loss_fn, has_aux=True)(p)
         combined_grads = jax.tree_util.tree_map(lambda g1, g2: g1 + 1.0 * g2, deq_grads, flow_grads)
 
-        p, opt_s = adam_apply(p, combined_grads, opt_s, lr=lr)
+        p, opt_s = adam_apply(p, combined_grads, opt_s, lr=lr_cur)
 
         # Distill persistent pool: put stepped states back
         batch_z0_up = batch_z0.at[:4].set(jax.lax.stop_gradient(z_final_stepped[0]))
@@ -465,7 +465,12 @@ def run_pyramid_experiment(
     k_steps = jax.random.split(k_loop, steps)
 
     for s in range(1, steps + 1):
-        params, opt_state, pool0, pool1, loss_val = pool_train_step(params, opt_state, pool0, pool1, k_steps[s - 1])
+        if s <= 20:
+            lr_s = lr * (s / 20.0)
+        else:
+            prog = (s - 20) / max(1, steps - 20)
+            lr_s = lr * (0.1 + 0.9 * 0.5 * (1.0 + math.cos(math.pi * prog)))
+        params, opt_state, pool0, pool1, loss_val = pool_train_step(params, opt_state, pool0, pool1, k_steps[s - 1], lr_s)
 
         if s % 20 == 0 or s == 1 or s == steps:
             preds_all = readout(pool0, params)
