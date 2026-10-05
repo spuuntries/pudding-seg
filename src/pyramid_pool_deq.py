@@ -26,7 +26,7 @@ def upsample_2x(x: jax.Array) -> jax.Array:
 
 
 def perceive_standard(z: jax.Array) -> jax.Array:
-    """Standard 3x3 Sobel perception with edge replicate padding (no torus wrap!)."""
+    """Multi-scale perception: state + Sobel gradients + direct 1-pixel directional diffs + 5-point Laplacian."""
     zp = jnp.pad(z, ((0, 0), (0, 0), (1, 1), (1, 1)), mode="edge")
     tl = zp[:, :, :-2, :-2]
     tc = zp[:, :, :-2, 1:-1]
@@ -38,7 +38,12 @@ def perceive_standard(z: jax.Array) -> jax.Array:
     br = zp[:, :, 2:, 2:]
     dx = (-tl + tr - 2.0 * ml + 2.0 * mr - bl + br) / 8.0
     dy = (-tl - 2.0 * tc - tr + bl + 2.0 * bc + br) / 8.0
-    return jnp.concatenate([z, dx, dy], axis=1)
+    d_r = mr - z
+    d_l = ml - z
+    d_d = bc - z
+    d_u = tc - z
+    lap = (tc + bc + ml + mr - 4.0 * z) / 4.0
+    return jnp.concatenate([z, dx, dy, d_r, d_l, d_d, d_u, lap], axis=1)
 
 
 def init_pyramid_deq(
@@ -51,8 +56,8 @@ def init_pyramid_deq(
     """Initializes 2-level Pyramid NCA DEQ parameters."""
     k0, k1, k_out = jax.random.split(key, 3)
 
-    # Input: 3*C (local perception) + C (inter-scale context) + in_cond_dim (spatial coordinates)
-    total_in = 3 * channels + channels + in_cond_dim
+    # Input: 8*C (local perception) + C (inter-scale context) + in_cond_dim (spatial coordinates)
+    total_in = 8 * channels + channels + in_cond_dim
     std_in = 1.0 / math.sqrt(total_in)
 
     # Scale 0 (Fine)
