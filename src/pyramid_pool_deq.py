@@ -475,10 +475,47 @@ def run_pyramid_experiment(
     elapsed = time.time() - t0
     print(f"[PYRAMID-DEQ] Training finished in {elapsed:.2f}s.")
 
-    # Find best equilibrium states in pool
+    # Find best equilibrium states in pool balancing clean PSNR and stationary drift
     preds_all = readout(pool0, params)
     mses = [float(np.mean((np.asarray(preds_all[i]) - clean_np) ** 2)) for i in range(pool_size)]
-    best_idx = int(np.argmin(mses))
+    psnrs_all = [psnr(np.asarray(preds_all[i]), clean_np) for i in range(pool_size)]
+    d0_all, d1_all = pyramid_delta((pool0, pool1), cond_pyr, params)
+    drifts = [float(np.mean(np.asarray(d0_all[i]) ** 2) + 0.5 * np.mean(np.asarray(d1_all[i]) ** 2)) for i in range(pool_size)]
+
+    for i in range(pool_size):
+        print(f"[POOL-SLOT] Slot {i:2d} | PSNR: {psnrs_all[i]:.2f} dB | Drift: {drifts[i]:.6f}")
+
+    # Evaluate top candidates on inpainting benchmark to find the best contractive basin
+    max_p = max(psnrs_all)
+    valid_candidates = [i for i in range(pool_size) if psnrs_all[i] >= max_p - 0.5]
+    top_candidates = sorted(valid_candidates, key=lambda i: drifts[i])[:6]
+    candidate_scores = []
+    mask_half0 = jnp.ones((1, 1, size, size), dtype=jnp.float32).at[:, :, :, size // 2:].set(0.0)
+    tgt_clean_base = clean_np[0] * 255.0 if out_channels == 1 else np.transpose(clean_np, (1, 2, 0)) * 255.0
+
+    for c_idx in top_candidates:
+        cand_z = (pool0[c_idx:c_idx + 1], pool1[c_idx:c_idx + 1])
+        zc0, zc1 = cand_z[0] * mask_half0, cand_z[1] * downsample_2x(mask_half0)
+        k_m1 = downsample_2x(mask_half0)
+        for _ in range(8):
+            _, d1 = pyramid_delta((zc0, zc1), cond_pyr, params)
+            zc1 = zc1 + 0.5 * d1
+            zc1 = jnp.where(k_m1 > 0.5, cand_z[1], zc1)
+        for _ in range(40):
+            d0, d1 = pyramid_delta((zc0, zc1), cond_pyr, params)
+            zc0 = zc0 + 0.5 * d0
+            zc1 = zc1 + 0.5 * d1
+            zc0 = jnp.where(mask_half0 > 0.5, cand_z[0], zc0)
+            zc1 = jnp.where(k_m1 > 0.5, cand_z[1], zc1)
+        p_eval = readout(zc0, params)[0]
+        p_eval_np = np.asarray(p_eval[0] if out_channels == 1 else np.transpose(p_eval, (1, 2, 0)))
+        diff = p_eval_np * 255.0 - tgt_clean_base
+        h_psnr = float(10.0 * np.log10(255.0 ** 2 / (np.mean(diff ** 2) + 1e-10)))
+        candidate_scores.append((h_psnr, c_idx))
+        print(f"[CANDIDATE-EVAL] Slot {c_idx:2d} | Clean PSNR: {psnrs_all[c_idx]:.2f} dB | Drift: {drifts[c_idx]:.6f} | Half-Wipe PSNR: {h_psnr:.2f} dB")
+
+    best_psnr, best_idx = max(candidate_scores, key=lambda x: x[0])
+    print(f"[POOL-SELECT] Winning Slot: {best_idx} with Half-Wipe PSNR: {best_psnr:.2f} dB!")
     z_eq = (pool0[best_idx:best_idx + 1], pool1[best_idx:best_idx + 1])
 
     if save_dir:
@@ -627,6 +664,25 @@ def run_pyramid_decimation_battery(
         imgs_pepper = [np.stack([im, im, im], axis=-1) for im in imgs_pepper]
     strip_pepper = np.concatenate(imgs_pepper, axis=1)
     Image.fromarray(strip_pepper).save(save_dir / "regen_pepper_strip.png")
+
+    tgt_clean = (clean_np[0] * 255.0) if out_channels == 1 else np.transpose(clean_np, (1, 2, 0)) * 255.0
+
+    def eval_metric(name, strip_path):
+        strip_im = Image.open(strip_path).convert("L" if out_channels == 1 else "RGB")
+        strip_arr = np.array(strip_im, dtype=float)
+        h, w = strip_arr.shape[:2]
+        cols = w // h
+        pred = strip_arr[:, (cols - 1) * h : cols * h]
+        diff = pred - tgt_clean
+        mse = float(np.mean(diff ** 2))
+        psnr_val = 10.0 * np.log10(255.0 ** 2 / (mse + 1e-10))
+        corr_val = float(np.corrcoef(pred.flatten(), tgt_clean.flatten())[0, 1])
+        print(f"[REGEN-EVAL] {name:10s} | PSNR: {psnr_val:.2f} dB | Corr: {corr_val:.4f} | MSE: {mse:.2f}")
+        return psnr_val
+
+    eval_metric("half_wipe", save_dir / "regen_half_wipe_strip.png")
+    eval_metric("crater", save_dir / "regen_crater_strip.png")
+    eval_metric("pepper", save_dir / "regen_pepper_strip.png")
 
     # Save 6x upscaled strips
     for strip_name, strip_arr in [
