@@ -253,7 +253,9 @@ def run_modal_pyramid(
         "target.png", "deq_recon.png", "deq_segmentation_pca.png", "deq_discrete_seg.png",
         "regen_half_wipe_strip.png", "regen_crater_strip.png", "regen_pepper_strip.png",
         "regen_half_wipe_strip_large.png", "regen_crater_strip_large.png", "regen_pepper_strip_large.png",
-        "z_latent.npy", "target_large.png", "deq_recon_large.png",
+        "regen_half_wipe_seg_strip.png", "regen_crater_seg_strip.png", "regen_pepper_seg_strip.png",
+        "regen_half_wipe_seg_strip_large.png", "regen_crater_seg_strip_large.png", "regen_pepper_seg_strip_large.png",
+        "z_latent.npy", "params.npz", "target_large.png", "deq_recon_large.png",
         "deq_segmentation_pca_large.png", "deq_discrete_seg_large.png",
     ]:
         file_p = out_dir / name

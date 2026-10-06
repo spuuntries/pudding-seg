@@ -649,6 +649,16 @@ def run_pyramid_decimation_battery(
         else:
             return np.clip(np.transpose(p_np, (1, 2, 0)) * 255.0, 0, 255).astype(np.uint8)
 
+    def to_seg(z_state):
+        z_np = np.asarray(z_state[0])
+        return extract_segmentation_pca(z_np)
+
+    # Save model parameters for inference / live simulation
+    np.savez(
+        save_dir / "params.npz",
+        **{k: np.asarray(v) for k, v in params.items()}
+    )
+
     # --- Test 1: Half-Wipe ---
     mask_half0 = jnp.ones((1, 1, size, size), dtype=jnp.float32)
     mask_half0 = mask_half0.at[:, :, :, size // 2:].set(0.0)
@@ -657,10 +667,13 @@ def run_pyramid_decimation_battery(
 
     snaps_half = forward_pyramid_relax((z_half0, z_half1), mask_half0, n_steps=40, step_size=0.5)
     imgs_half = [to_img(s) for s in snaps_half]
+    segs_half = [to_seg(s) for s in snaps_half]
     if out_channels == 1:
         imgs_half = [np.stack([im, im, im], axis=-1) for im in imgs_half]
     strip_half = np.concatenate(imgs_half, axis=1)
+    strip_seg_half = np.concatenate(segs_half, axis=1)
     Image.fromarray(strip_half).save(save_dir / "regen_half_wipe_strip.png")
+    Image.fromarray(strip_seg_half).save(save_dir / "regen_half_wipe_seg_strip.png")
 
     # --- Test 2: Center Crater ---
     yy, xx = np.mgrid[:size, :size].astype(np.float32)
@@ -672,10 +685,13 @@ def run_pyramid_decimation_battery(
 
     snaps_circle = forward_pyramid_relax((z_circle0, z_circle1), jnp.asarray(mask_circle0), n_steps=40, step_size=0.5)
     imgs_circle = [to_img(s) for s in snaps_circle]
+    segs_circle = [to_seg(s) for s in snaps_circle]
     if out_channels == 1:
         imgs_circle = [np.stack([im, im, im], axis=-1) for im in imgs_circle]
     strip_circle = np.concatenate(imgs_circle, axis=1)
+    strip_seg_circle = np.concatenate(segs_circle, axis=1)
     Image.fromarray(strip_circle).save(save_dir / "regen_crater_strip.png")
+    Image.fromarray(strip_seg_circle).save(save_dir / "regen_crater_seg_strip.png")
 
     # --- Test 3: Pepper Decimation ---
     np.random.seed(42)
@@ -685,10 +701,13 @@ def run_pyramid_decimation_battery(
 
     snaps_pepper = forward_pyramid_relax((z_pepper0, z_pepper1), jnp.asarray(mask_pepper0), n_steps=40, step_size=0.5)
     imgs_pepper = [to_img(s) for s in snaps_pepper]
+    segs_pepper = [to_seg(s) for s in snaps_pepper]
     if out_channels == 1:
         imgs_pepper = [np.stack([im, im, im], axis=-1) for im in imgs_pepper]
     strip_pepper = np.concatenate(imgs_pepper, axis=1)
+    strip_seg_pepper = np.concatenate(segs_pepper, axis=1)
     Image.fromarray(strip_pepper).save(save_dir / "regen_pepper_strip.png")
+    Image.fromarray(strip_seg_pepper).save(save_dir / "regen_pepper_seg_strip.png")
 
     tgt_clean = (clean_np[0] * 255.0) if out_channels == 1 else np.transpose(clean_np, (1, 2, 0)) * 255.0
 
@@ -712,8 +731,11 @@ def run_pyramid_decimation_battery(
     # Save 6x upscaled strips
     for strip_name, strip_arr in [
         ("regen_half_wipe_strip", strip_half),
+        ("regen_half_wipe_seg_strip", strip_seg_half),
         ("regen_crater_strip", strip_circle),
+        ("regen_crater_seg_strip", strip_seg_circle),
         ("regen_pepper_strip", strip_pepper),
+        ("regen_pepper_seg_strip", strip_seg_pepper),
     ]:
         im = Image.fromarray(strip_arr)
         im_large = im.resize((im.width * 6, im.height * 6), Image.Resampling.NEAREST)
