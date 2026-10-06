@@ -426,6 +426,15 @@ def run_pyramid_experiment(
 
             l_recon = 2.0 * l_recon_l1 + 2.5 * l_edge + 0.5 * l_lap + 0.5 * l_contrast + 4.0 * l_mean_match
 
+            # Bilateral edge-aware grouping loss on latent space
+            edge_x = jnp.mean(jnp.abs(y_sub[:, :, :, 1:] - y_sub[:, :, :, :-1]), axis=1, keepdims=True)
+            edge_y = jnp.mean(jnp.abs(y_sub[:, :, 1:, :] - y_sub[:, :, :-1, :]), axis=1, keepdims=True)
+            w_edge_x = jnp.exp(-edge_x / 0.08)
+            w_edge_y = jnp.exp(-edge_y / 0.08)
+            dz_x0 = jnp.sqrt((z0_final[:, :, :, 1:] - z0_final[:, :, :, :-1]) ** 2 + 1e-6)
+            dz_y0 = jnp.sqrt((z0_final[:, :, 1:, :] - z0_final[:, :, :-1, :]) ** 2 + 1e-6)
+            l_group = jnp.mean(w_edge_x * dz_x0) + jnp.mean(w_edge_y * dz_y0)
+
             # Stationary constraints: Delta at target must be 0
             d0_target, d1_target = pyramid_delta((z0_target_stop, z1_target_stop), cond_pyr, p_curr)
             l_target_drift = jnp.mean(d0_target ** 2) + 0.5 * jnp.mean(d1_target ** 2)
@@ -440,7 +449,7 @@ def run_pyramid_experiment(
             z1_restored = z1_pert + 0.5 * d1_pert
             l_spring = jnp.mean((z0_restored - z0_target_stop) ** 2) + 0.5 * jnp.mean((z1_restored - z1_target_stop) ** 2)
 
-            loss = 2.0 * l_flow + 1.2 * l_recon + 1.0 * l_target_drift + 3.0 * l_spring
+            loss = 2.0 * l_flow + 1.2 * l_recon + 1.0 * l_target_drift + 3.0 * l_spring + 0.8 * l_group
             return loss, (z0_final, z1_final)
 
         (flow_val, z_final_stepped), flow_grads = jax.value_and_grad(flow_loss_fn, has_aux=True)(p)
@@ -541,11 +550,17 @@ def run_pyramid_experiment(
             Image.fromarray(np.clip(np.transpose(pred_np0, (1, 2, 0)) * 255.0, 0, 255).astype(np.uint8)).save(save_dir / "deq_recon.png")
 
         hidden_np = np.asarray(z_eq[0][0])
+        np.save(save_dir / "z_latent.npy", hidden_np)
         seg_pca = extract_segmentation_pca(hidden_np)
         Image.fromarray(seg_pca).save(save_dir / "deq_segmentation_pca.png")
+        Image.fromarray(seg_pca).resize((size * 6, size * 6), Image.Resampling.NEAREST).save(save_dir / "deq_segmentation_pca_large.png")
 
         labels_2d, discrete_rgb, _ = extract_discrete_segmentation(hidden_np, n_clusters=4, seed=seed)
         Image.fromarray(discrete_rgb).save(save_dir / "deq_discrete_seg.png")
+        Image.fromarray(discrete_rgb).resize((size * 6, size * 6), Image.Resampling.NEAREST).save(save_dir / "deq_discrete_seg_large.png")
+
+        Image.open(save_dir / "target.png").resize((size * 6, size * 6), Image.Resampling.NEAREST).save(save_dir / "target_large.png")
+        Image.open(save_dir / "deq_recon.png").resize((size * 6, size * 6), Image.Resampling.NEAREST).save(save_dir / "deq_recon_large.png")
 
         # Run Decimation Battery on Pyramid
         run_pyramid_decimation_battery(params, z_eq, cond_pyr, clean_np, out_channels, size, save_dir)
