@@ -775,12 +775,13 @@ html_content = f"""<!DOCTYPE html>
             for (let c = 0; c < 16; c++) z0[c * 48 * 48 + idx] = 0.0;
             isSettled = false;
             consecutiveSettle = 0;
-            isSimRunning = true;
-            document.getElementById("sim-icon").textContent = "❚❚";
-            document.getElementById("sim-text").textContent = "Pause Simulation";
             stepCount = 0;
             document.getElementById("txt-step").textContent = "0";
-            updateBadge("healing");
+            if (isSimRunning) {{
+              updateBadge("healing");
+            }} else {{
+              updateBadge("paused");
+            }}
           }}
         }}
       }}
@@ -813,11 +814,12 @@ html_content = f"""<!DOCTYPE html>
       stepCount = 0;
       isSettled = false;
       consecutiveSettle = 0;
-      isSimRunning = true;
-      document.getElementById("sim-icon").textContent = "❚❚";
-      document.getElementById("sim-text").textContent = "Pause Simulation";
       document.getElementById("txt-step").textContent = "0";
-      updateBadge("healing");
+      if (isSimRunning) {{
+        updateBadge("healing");
+      }} else {{
+        updateBadge("paused");
+      }}
 
       if (type === "half") {{
         for (let y = 0; y < 48; y++) {{
