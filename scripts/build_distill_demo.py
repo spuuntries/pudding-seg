@@ -53,7 +53,7 @@ metrics = {
         "half_wipe": "34.26 dB (r=0.9976)",
         "crater": "34.40 dB (r=0.9976)",
         "pepper": "29.37 dB (r=0.9923)",
-        "spectral": "|lambda_max| = 1.0002",
+        "spectral": r"\(|\lambda_{\max}| = 1.0002\)",
         "drift": "< 2e-6"
     },
     "coins": {
@@ -63,7 +63,7 @@ metrics = {
         "half_wipe": "31.15 dB (r=0.9888)",
         "crater": "32.50 dB (r=0.9915)",
         "pepper": "27.10 dB (r=0.9690)",
-        "spectral": "|lambda_max| = 1.0006",
+        "spectral": r"\(|\lambda_{\max}| = 1.0006\)",
         "drift": "< 2e-6"
     },
     "chelsea": {
@@ -73,7 +73,7 @@ metrics = {
         "half_wipe": "33.99 dB (r=0.9928)",
         "crater": "35.00 dB (r=0.9936)",
         "pepper": "31.13 dB (r=0.9838)",
-        "spectral": "|lambda_max| = 1.0018",
+        "spectral": r"\(|\lambda_{\max}| = 1.0018\)",
         "drift": "< 4e-6"
     }
 }
@@ -85,6 +85,9 @@ html_content = f"""<!DOCTYPE html>
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>PUDDING: Interactive Neural Cellular Automata Demo</title>
   <script src="https://www.gstatic.com/antigravity/web/dev/tailwindcss.min.js"></script>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+  <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+  <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="triggerMathRender()"></script>
   <style>
     @import url('https://fonts.googleapis.com/css2?family=Newsreader:ital,opsz,wght@0,6..72,400..700;1,6..72,400..700&family=Inter:wght@400;500;600;700&display=swap');
     
@@ -256,7 +259,7 @@ html_content = f"""<!DOCTYPE html>
         </div>
         <div>
           <span class="text-[11px] text-slate-400 block">Spectral Radius</span>
-          <span id="stat-spectral" class="text-xs font-mono font-bold text-cyan-300">|λ_max| = 1.0002</span>
+          <span id="stat-spectral" class="text-xs font-mono font-bold text-cyan-300">\\(|\\lambda_{{\\max}}| = 1.0002\\)</span>
         </div>
       </div>
 
@@ -306,6 +309,25 @@ html_content = f"""<!DOCTYPE html>
   <script>
     const MODELS = {json.dumps(models_b64)};
     const METRICS = {json.dumps(metrics)};
+
+    function triggerMathRender() {{
+      if (window.renderMathInElement) {{
+        renderMathInElement(document.body, {{
+          delimiters: [
+            {{left: '$$', right: '$$', display: true}},
+            {{left: '\\\\[', right: '\\\\]', display: true}},
+            {{left: '\\\\(', right: '\\\\)', display: false}},
+            {{left: '$', right: '$', display: false}}
+          ],
+          throwOnError: false
+        }});
+      }}
+    }}
+
+    window.addEventListener("DOMContentLoaded", () => {{
+      setTimeout(triggerMathRender, 50);
+      setTimeout(triggerMathRender, 300);
+    }});
 
     let currentDataset = "camera";
     let brushRadius = 4;
@@ -418,9 +440,10 @@ html_content = f"""<!DOCTYPE html>
       document.getElementById("stat-recon").textContent = met.recon_psnr;
       document.getElementById("stat-half").textContent = met.half_wipe;
       document.getElementById("stat-crater").textContent = met.crater;
-      document.getElementById("stat-spectral").textContent = met.spectral;
+      document.getElementById("stat-spectral").innerHTML = met.spectral;
 
       render();
+      triggerMathRender();
     }}
 
     // One cellular step of Pyramid NCA
