@@ -568,9 +568,10 @@ html_content = f"""<!DOCTYPE html>
       const relDiff = diff / (rms + 1e-6);
 
       // Dynamic Equilibrium Settling Criterion (no hardcoded step limit)
-      if (damCount > 0 && stepCount >= 10 && (rms < 3.8e-4 || (stepCount >= 18 && relDiff < 0.035))) {{
+      // Allows ~35-55 steps for full cellular regeneration to resolve before locking
+      if (damCount > 0 && stepCount >= 25 && (rms < 2.5e-4 || (stepCount >= 36 && relDiff < 0.018))) {{
         consecutiveSettle++;
-        if (consecutiveSettle >= 3) {{
+        if (consecutiveSettle >= 4) {{
           mask0.fill(1.0); // Lock healed tissue into fixed-point attractor
           isSettled = true;
           updateBadge("settled");
