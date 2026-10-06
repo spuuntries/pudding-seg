@@ -20,10 +20,38 @@ from .nca_pcalm import (
 )
 
 
-def extract_segmentation_pca(hidden_states: np.ndarray) -> np.ndarray:
-    """Projects hidden channels (C-1, H, W) to 3 RGB channels via PCA to visualize neural grouping."""
+def compute_latent_perception(hidden_states: np.ndarray) -> np.ndarray:
+    """Augments latent states with local discrete Laplacian and gradient magnitude."""
     c, h, w = hidden_states.shape
-    features = hidden_states.reshape(c, -1).T.copy()
+    pad = np.pad(hidden_states, ((0, 0), (1, 1), (1, 1)), mode="edge")
+    tl = pad[:, :-2, :-2]
+    tc = pad[:, :-2, 1:-1]
+    tr = pad[:, :-2, 2:]
+    ml = pad[:, 1:-1, :-2]
+    mr = pad[:, 1:-1, 2:]
+    bl = pad[:, 2:, :-2]
+    bc = pad[:, 2:, 1:-1]
+    br = pad[:, 2:, 2:]
+
+    dx = (-tl + tr - 2.0 * ml + 2.0 * mr - bl + br) / 8.0
+    dy = (-tl - 2.0 * tc - tr + bl + 2.0 * bc + br) / 8.0
+    lap = (tc + bc + ml + mr - 4.0 * hidden_states) / 4.0
+    grad_mag = np.sqrt(dx**2 + dy**2)
+
+    z_norm = (hidden_states - np.mean(hidden_states, axis=(1, 2), keepdims=True)) / (np.std(hidden_states, axis=(1, 2), keepdims=True) + 1e-6)
+    lap_norm = lap / (np.std(lap) + 1e-6)
+    grad_norm = grad_mag / (np.std(grad_mag) + 1e-6)
+    return np.concatenate([z_norm, lap_norm, grad_norm], axis=0)
+
+
+def extract_segmentation_pca(hidden_states: np.ndarray, use_perception: bool = True) -> np.ndarray:
+    """Projects hidden channels (C, H, W) to 3 RGB channels via PCA to visualize neural grouping."""
+    c, h, w = hidden_states.shape
+    if use_perception:
+        aug = compute_latent_perception(hidden_states)
+        features = aug.reshape(aug.shape[0], -1).T.copy()
+    else:
+        features = hidden_states.reshape(c, -1).T.copy()
     features = features - np.mean(features, axis=0, keepdims=True)
 
     # SVD for top 3 components
@@ -41,6 +69,7 @@ def extract_discrete_segmentation(
     hidden_states: np.ndarray,
     n_clusters: int = 4,
     seed: int = 42,
+    use_perception: bool = True,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Clusters hidden channels (C, H, W) into n_clusters discrete masks.
 
@@ -52,7 +81,11 @@ def extract_discrete_segmentation(
     from scipy.cluster.vq import kmeans2
 
     c, h, w = hidden_states.shape
-    features = hidden_states.reshape(c, -1).T.copy()
+    if use_perception:
+        aug = compute_latent_perception(hidden_states)
+        features = aug.reshape(aug.shape[0], -1).T.copy()
+    else:
+        features = hidden_states.reshape(c, -1).T.copy()
     f_mean = np.mean(features, axis=0, keepdims=True)
     f_std = np.std(features, axis=0, keepdims=True) + 1e-6
     feats_norm = (features - f_mean) / f_std
