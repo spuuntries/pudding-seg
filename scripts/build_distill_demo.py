@@ -175,7 +175,7 @@ html_content = f"""<!DOCTYPE html>
         <div class="flex flex-col items-center w-full max-w-sm">
           <div class="w-full flex items-center justify-between mb-2">
             <span class="text-xs font-semibold text-slate-300 flex items-center gap-1.5">
-              <span>🖼️</span> Reconstructed Image (\\(y = W_{{\\text{{out}}}} z\\))
+              <span>🖼️</span> Reconstructed Image <span class="whitespace-nowrap font-normal text-slate-400">(\\(y = W_{{\\text{{out}}}} z\\))</span>
             </span>
             <span class="text-[11px] text-slate-500 font-mono">photometric</span>
           </div>
@@ -194,7 +194,7 @@ html_content = f"""<!DOCTYPE html>
         <div class="flex flex-col items-center w-full max-w-sm">
           <div class="w-full flex items-center justify-between mb-2">
             <span class="text-xs font-semibold text-slate-300 flex items-center gap-1.5">
-              <span>🧬</span> Emergent Segmentation (\\(\\text{{PCA}}(z, \\text{{lap}}, \\|\\nabla z\\|)\\))
+              <span>🧬</span> Emergent Segmentation <span class="whitespace-nowrap font-normal text-slate-400">(\\(\\text{{PCA}}(z, \\text{{lap}}, \\|\\nabla z\\|)\\))</span>
             </span>
             <span class="text-[11px] text-slate-500 font-mono">neural grouping</span>
           </div>
@@ -332,7 +332,28 @@ html_content = f"""<!DOCTYPE html>
     let currentDataset = "camera";
     let brushRadius = 4;
     let isSimRunning = true;
+    let isSettled = true;
     let stepCount = 0;
+    let prevRms = 1.0;
+    let consecutiveSettle = 0;
+
+    function updateBadge(state, val) {{
+      const b = document.getElementById("badge-running");
+      if (!b) return;
+      if (state === "settled") {{
+        b.textContent = "✓ Settled at Fixed Point (step " + stepCount + ")";
+        b.className = "inline-flex items-center px-2 py-0.5 rounded text-[11px] font-mono font-medium bg-indigo-500/20 text-indigo-300";
+      }} else if (state === "healing") {{
+        b.textContent = "● Healing (res " + (val ? val.toExponential(1) : "active") + ")";
+        b.className = "inline-flex items-center px-2 py-0.5 rounded text-[11px] font-mono font-medium bg-emerald-500/20 text-emerald-300 animate-pulse";
+      }} else if (state === "clean") {{
+        b.textContent = "✓ Equilibrium Attractor (Clean)";
+        b.className = "inline-flex items-center px-2 py-0.5 rounded text-[11px] font-mono font-medium bg-slate-800 text-slate-300";
+      }} else if (state === "paused") {{
+        b.textContent = "○ Paused";
+        b.className = "inline-flex items-center px-2 py-0.5 rounded text-[11px] font-mono font-medium bg-slate-800 text-slate-400";
+      }}
+    }}
 
     // Decode base64 float32
     function b64ToF32(b64) {{
@@ -431,8 +452,11 @@ html_content = f"""<!DOCTYPE html>
 
       // Reset mask to all keep
       mask0.fill(1.0);
+      isSettled = true;
+      consecutiveSettle = 0;
       stepCount = 0;
       document.getElementById("txt-step").textContent = "0";
+      updateBadge("clean");
 
       // Update metrics text
       const met = METRICS[dsKey];
@@ -513,8 +537,11 @@ html_content = f"""<!DOCTYPE html>
       }}
 
       // 4. Update cells inside damaged regions
+      let sqSum = 0;
+      let damCount = 0;
       for (let idx = 0; idx < 48 * 48; idx++) {{
         if (mask0[idx] > 0.5) continue; // Boundary condition: keep fixed to clean attractor
+        damCount++;
 
         for (let h = 0; h < 96; h++) {{
           let sum = b1_0[h];
@@ -527,14 +554,37 @@ html_content = f"""<!DOCTYPE html>
           let sum = b2_0[c];
           const wRow = c * 96;
           for (let h = 0; h < 96; h++) sum += w2_0[wRow + h] * hidden0[h];
-          z0[c * 48 * 48 + idx] += 0.5 * sum;
+          const delta = 0.5 * sum;
+          z0[c * 48 * 48 + idx] += delta;
+          sqSum += delta * delta;
         }}
       }}
 
-      const elapsed = performance.now() - t0;
-      document.getElementById("txt-ms").textContent = Math.round(elapsed) + "ms";
       stepCount++;
       document.getElementById("txt-step").textContent = stepCount;
+
+      const rms = damCount > 0 ? Math.sqrt(sqSum / (damCount * 16)) : 0;
+      const diff = Math.abs(rms - prevRms);
+      const relDiff = diff / (rms + 1e-6);
+
+      // Dynamic Equilibrium Settling Criterion (no hardcoded step limit)
+      if (damCount > 0 && stepCount >= 10 && (rms < 3.8e-4 || (stepCount >= 18 && relDiff < 0.035))) {{
+        consecutiveSettle++;
+        if (consecutiveSettle >= 3) {{
+          mask0.fill(1.0); // Lock healed tissue into fixed-point attractor
+          isSettled = true;
+          updateBadge("settled");
+        }}
+      }} else {{
+        consecutiveSettle = 0;
+        if (damCount > 0 && !isSettled) {{
+          updateBadge("healing", rms);
+        }}
+      }}
+      prevRms = rms;
+
+      const elapsed = performance.now() - t0;
+      document.getElementById("txt-ms").textContent = Math.round(elapsed) + "ms";
     }}
 
     // Render both canvases
@@ -659,7 +709,7 @@ html_content = f"""<!DOCTYPE html>
 
     // Animation Loop
     function loop() {{
-      if (isSimRunning) {{
+      if (isSimRunning && !isSettled) {{
         stepPyramid();
         render();
       }}
@@ -670,20 +720,31 @@ html_content = f"""<!DOCTYPE html>
       isSimRunning = !isSimRunning;
       document.getElementById("sim-icon").textContent = isSimRunning ? "❚❚" : "▶";
       document.getElementById("sim-text").textContent = isSimRunning ? "Pause Simulation" : "Resume Simulation";
-      document.getElementById("badge-running").textContent = isSimRunning ? "● Live Engine Active" : "○ Paused";
-      document.getElementById("badge-running").className = isSimRunning 
-        ? "inline-flex items-center px-2 py-0.5 rounded text-[11px] font-mono font-medium bg-emerald-500/20 text-emerald-300"
-        : "inline-flex items-center px-2 py-0.5 rounded text-[11px] font-mono font-medium bg-slate-800 text-slate-400";
+      if (!isSimRunning) {{
+        updateBadge("paused");
+      }} else {{
+        if (isSettled) {{
+          updateBadge("settled");
+        }} else {{
+          updateBadge("healing");
+        }}
+      }}
     }}
 
     function stepOnce() {{
+      const wasSettled = isSettled;
+      isSettled = false;
       stepPyramid();
       render();
+      if (wasSettled) isSettled = true;
     }}
 
     function stepMany(n) {{
+      const wasSettled = isSettled;
+      isSettled = false;
       for (let i = 0; i < n; i++) stepPyramid();
       render();
+      if (wasSettled) isSettled = true;
     }}
 
     // Interactive mouse drawing damage
@@ -712,6 +773,14 @@ html_content = f"""<!DOCTYPE html>
             const idx = py * 48 + px;
             mask0[idx] = 0.0; // Damage!
             for (let c = 0; c < 16; c++) z0[c * 48 * 48 + idx] = 0.0;
+            isSettled = false;
+            consecutiveSettle = 0;
+            isSimRunning = true;
+            document.getElementById("sim-icon").textContent = "❚❚";
+            document.getElementById("sim-text").textContent = "Pause Simulation";
+            stepCount = 0;
+            document.getElementById("txt-step").textContent = "0";
+            updateBadge("healing");
           }}
         }}
       }}
@@ -742,7 +811,13 @@ html_content = f"""<!DOCTYPE html>
     // Presets
     function applyPreset(type) {{
       stepCount = 0;
+      isSettled = false;
+      consecutiveSettle = 0;
+      isSimRunning = true;
+      document.getElementById("sim-icon").textContent = "❚❚";
+      document.getElementById("sim-text").textContent = "Pause Simulation";
       document.getElementById("txt-step").textContent = "0";
+      updateBadge("healing");
 
       if (type === "half") {{
         for (let y = 0; y < 48; y++) {{
@@ -790,7 +865,10 @@ html_content = f"""<!DOCTYPE html>
       z1.set(z1_clean);
       mask0.fill(1.0);
       stepCount = 0;
+      isSettled = true;
+      consecutiveSettle = 0;
       document.getElementById("txt-step").textContent = "0";
+      updateBadge("clean");
       render();
     }}
 
